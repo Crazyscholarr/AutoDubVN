@@ -37,3 +37,5 @@ assets/nhac_nen/*.wav
 # Large/local tools
 tools/
 EOFlogin_gemini.bat
+
+/login_gemini.bat
