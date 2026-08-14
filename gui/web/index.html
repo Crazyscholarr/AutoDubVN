@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AutoDubVN</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ================= THANH TIÊU ĐỀ ================= -->
+  <header class="titlebar">
+    <div class="brand">
+      <div class="logo">AD</div>
+      <div class="brand-text">
+        <div class="brand-name">AutoDubVN</div>
+        <div class="brand-sub">Lồng tiếng Việt tự động cho video</div>
+      </div>
+    </div>
+    <div class="titlebar-actions">
+      <span id="statusDot" class="status-dot idle" title="Trạng thái"></span>
+      <span id="statusText" class="status-text">Sẵn sàng</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ================= CỘT TRÁI: NHẬP + CẤU HÌNH ================= -->
+    <section class="panel">
+      <h2 class="panel-title">1 · Nguồn video</h2>
+      <div class="input-row">
+        <input id="videoInput" type="text" class="text-input"
+               placeholder="Dán đường dẫn file, hoặc link Bilibili / YouTube..." />
+        <button id="browseBtn" class="btn btn-ghost">Chọn file…</button>
+      </div>
+
+      <div class="run-row">
+        <button id="startBtn" class="btn btn-primary">▶ Bắt đầu lồng tiếng</button>
+        <button id="stopBtn" class="btn btn-danger" disabled>■ Dừng</button>
+      </div>
+
+      <h2 class="panel-title mt">2 · Cấu hình nhanh</h2>
+      <div class="settings-grid" id="settingsGrid">
+        <!-- ASR -->
+        <div class="group-label">Nhận phụ đề (ASR)</div>
+        <label>Backend
+          <select data-key="asr.backend">
+            <option value="paraformer">paraformer (tốt cho tiếng Trung)</option>
+            <option value="faster-whisper">faster-whisper (đa ngôn ngữ)</option>
+            <option value="sensevoice">sensevoice (nhanh)</option>
+            <option value="whisperx">whisperx</option>
+          </select>
+        </label>
+        <label>Ngôn ngữ nguồn
+          <input type="text" data-key="asr.source_language" placeholder="null = tự nhận (zh/en/ja…)" />
+        </label>
+        <label>Thiết bị
+          <select data-key="asr.device">
+            <option value="cuda">cuda (GPU)</option>
+            <option value="cpu">cpu</option>
+          </select>
+        </label>
+
+        <!-- Dịch -->
+        <div class="group-label">Dịch sang tiếng Việt</div>
+        <label>Chế độ
+          <select data-key="translation.provider">
+            <option value="browser">browser (Gemini qua trình duyệt)</option>
+            <option value="gemini">gemini (API key)</option>
+          </select>
+        </label>
+        <label>Nhịp ký tự / giây
+          <input type="number" step="1" data-key="translation.chars_per_sec" />
+        </label>
+        <label>Số dòng mỗi lô
+          <input type="number" step="1" data-key="translation.chunk_size" />
+        </label>
+        <label class="col-2">Gemini API key (chỉ khi chọn gemini)
+          <input type="text" data-key="translation.gemini_api_key" placeholder="để trống nếu dùng browser" />
+        </label>
+
+        <!-- TTS -->
+        <div class="group-label">Tổng hợp giọng (TTS)</div>
+        <label>Engine
+          <select data-key="tts.engine">
+            <option value="edge">edge (miễn phí)</option>
+            <option value="vieneu">vieneu (local, tự nhiên hơn)</option>
+            <option value="capcut">capcut (online, nhiều giọng)</option>
+          </select>
+        </label>
+        <label>Kiểu giọng
+          <select data-key="tts.voice_mode">
+            <option value="narrator">narrator (1 giọng)</option>
+            <option value="alternate">alternate (nam/nữ luân phiên)</option>
+            <option value="per-speaker">per-speaker (theo nhân vật)</option>
+          </select>
+        </label>
+        <label>Giọng kể
+          <select data-key="tts.narrator_voice">
+            <option value="vi-VN-NamMinhNeural">Nam Minh (nam)</option>
+            <option value="vi-VN-HoaiMyNeural">Hoài My (nữ)</option>
+          </select>
+        </label>
+        <label>Tốc độ tối đa
+          <input type="number" step="0.1" data-key="tts.max_speed" />
+        </label>
+
+        <!-- Video -->
+        <div class="group-label">Xuất video</div>
+        <label class="check"><input type="checkbox" data-key="video.hardsub_vietnamese" /> Ghi cứng phụ đề Việt</label>
+        <label class="check"><input type="checkbox" data-key="video.render_chunked" /> Chia render rồi tự ghép</label>
+        <label>Phút mỗi phần
+          <input type="number" step="10" data-key="video.render_chunk_minutes" />
+        </label>
+        <label class="check"><input type="checkbox" data-key="video.force_h264" /> Ép H.264 (Windows xem được)</label>
+        <label class="check"><input type="checkbox" data-key="diarization.enabled" /> Tách nhân vật (diarization)</label>
+        <label class="check"><input type="checkbox" data-key="video.keep_original_muted" /> Tắt hẳn âm thanh gốc</label>
+        <label>Âm lượng nền gốc (-60 đến 0 dB)
+          <input type="number" min="-60" max="0" step="1" data-key="video.keep_original_db" placeholder="-30" />
+        </label>
+        <label>Đuôi file kết quả
+          <input type="text" data-key="output.suffix" placeholder=".vietsub_dub" />
+        </label>
+      </div>
+
+      <div class="save-row">
+        <button id="saveBtn" class="btn btn-ghost">Lưu cấu hình</button>
+        <span id="saveHint" class="hint"></span>
+      </div>
+    </section>
+
+    <!-- ================= CỘT PHẢI: LOG + KẾT QUẢ ================= -->
+    <section class="panel console-panel">
+      <div class="console-head">
+        <h2 class="panel-title">Nhật ký chạy</h2>
+        <button id="clearBtn" class="btn btn-ghost btn-sm">Xoá log</button>
+      </div>
+      <div id="console" class="console"></div>
+
+      <div id="resultBar" class="result-bar hidden">
+        <div class="result-info">
+          <div class="result-title">✓ Xong!</div>
+          <div id="resultPath" class="result-path"></div>
+        </div>
+        <div class="result-actions">
+          <button id="playBtn" class="btn btn-primary btn-sm">▶ Mở video</button>
+          <button id="folderBtn" class="btn btn-ghost btn-sm">Mở thư mục</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

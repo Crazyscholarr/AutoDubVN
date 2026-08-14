@@ -1,0 +1,39 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+browser_profile/
+downloads/
+output/
+
+.cursor/
+
+config.yaml
+.env
+.env.*
+*.log
+# Local / generated
+venv/
+.venv/
+__pycache__/
+*.pyc
+browser_profile/
+downloads/
+output/
+.cursor/
+config.yaml
+.env
+.env.*
+*.log
+*.bak*
+cat >> .gitignore <<'EOF'
+
+# Media assets
+assets/nhac_nen/*.mp3
+assets/nhac_nen/*.flac
+assets/nhac_nen/*.wav
+
+# Large/local tools
+tools/
+EOF

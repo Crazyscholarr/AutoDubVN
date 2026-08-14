@@ -1,0 +1,21 @@
+# ===== Bắt buộc =====
+pyyaml
+edge-tts>=6.1.9
+requests>=2.25.0
+soundfile          # ghép timeline audio kiểu streaming cho video nhiều giờ
+yt-dlp            # tải video từ link (Bilibili/YouTube...)
+playwright        # dịch bằng cách điều khiển Edge vào Gemini (không cần API key)
+# (ghép audio dùng thẳng ffmpeg - không cần pydub)
+
+# ===== ASR (theo backend trong config.yaml) =====
+# Cài torch bản CUDA TRƯỚC (xem install.bat / README).
+# backend "paraformer" (mặc định, tốt nhất tiếng Trung) cần funasr + modelscope:
+funasr!=1.3.9      # né bản 1.3.9 lỗi FSMN-VAD (trả 1 đoạn khổng lồ)
+modelscope
+# backend "faster-whisper" (đa ngôn ngữ, dự phòng):
+faster-whisper
+
+# ===== Tùy chọn - bỏ dấu # nếu dùng =====
+# whisperx            # KHÔNG khuyên dùng: hay mất đoạn giữa với video dài
+# pyannote.audio      # tách nhân vật (diarization)
+# vieneu              # tts.engine: vieneu - giọng tự nhiên hơn edge-tts, chạy local, miễn phí

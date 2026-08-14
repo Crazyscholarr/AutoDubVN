@@ -1,0 +1,6 @@
+# Thư viện cho APP DESKTOP (cửa sổ riêng).
+# pywebview dùng WebView2 có sẵn trên Windows 10/11 -> KHÔNG cài thêm .exe,
+# nên không bị Device Guard/WDAC chặn như Qt/Electron.
+pywebview>=5.3
+pythonnet>=3.0.5     # backend EdgeChromium trên Windows
+pyyaml

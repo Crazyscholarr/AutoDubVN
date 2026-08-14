@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoDubVN · By Crazyscholar</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="titlebar">
+  <div class="drag pywebview-drag-region">
+    <div class="brand"><div class="dot"></div><b>AutoDubVN</b><span id="ver">v2.5</span>
+      <span id="cuda">· đang kiểm tra</span></div>
+    <div class="creator-banner" title="AutoDubVN by Crazyscholar">
+      <i></i><span>By</span><strong>Crazyscholar</strong>
+    </div>
+  </div>
+  <div class="wbtns" id="wbtns">
+    <button class="wbtn" title="Thu nhỏ" onclick="winCmd('min')">─</button>
+    <button class="wbtn" title="Phóng to" onclick="winCmd('max')">▢</button>
+    <button class="wbtn close" title="Đóng" onclick="winCmd('close')">✕</button>
+  </div>
+</div>
+
+<div id="top">
+  <div id="modesw">
+    <button id="mDub" class="on" onclick="setMode('dub')">🎬 Lồng tiếng video</button>
+    <button id="mStory" onclick="setMode('story')">📖 Video kể chuyện</button>
+  </div>
+  <button class="btn dub-only" onclick="pickFile()">▣ Chọn video</button>
+  <div id="urlbox" class="dub-only">
+    <input id="url" placeholder="Dán link YouTube / Bilibili / Douyin để tải về…"
+           onkeydown="if(event.key==='Enter')addUrl()">
+    <button onclick="addUrl()">Tải về</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="selwrap dub-only">Hồ sơ
+    <select class="inp" id="profile">
+      <option>Phim Trung → Việt (mặc định)</option>
+      <option>Phim Anh → Việt</option>
+      <option>Thuyết minh 1 giọng</option>
+    </select>
+  </div>
+  <button class="btn dub-only" onclick="setTab('export')">⚙ Cài đặt</button>
+</div>
+
+<div id="main">
+  <!-- LEFT -->
+  <div id="left">
+    <div class="lhead"><span>HÀNG ĐỢI XỬ LÝ</span><span id="qcount">0 mục</span></div>
+    <div id="queue"></div>
+    <div class="lfoot">
+      <button class="btn" onclick="pickFile()">+ Thêm video vào hàng đợi</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn sm" style="flex:1" onclick="clearDone()">Xoá đã xong</button>
+        <button class="btn sm" style="flex:1" onclick="saveProject()">Lưu danh sách</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER -->
+  <div id="center">
+    <div id="tools">
+      <button class="btn on" onclick="addRegion('blur')">▭ Thêm vùng làm mờ</button>
+      <button class="btn" onclick="autoDetect()">✦ Tự dò sub cứng</button>
+      <button class="btn" onclick="addRegion('delogo')">✕ Xoá logo gốc</button>
+      <button class="btn" onclick="clearRegions()">Xoá tất cả vùng</button>
+      <button class="btn" onclick="setTab('cut')">✂ Cắt video</button>
+      <button class="btn" onclick="addLogoBox()">▤ Chèn logo</button>
+      <button class="btn" onclick="setTab('sub')">T Sửa phụ đề</button>
+      <label class="chk"><input type="checkbox" id="prev" checked onchange="draw()">
+        Xem trước hiệu ứng</label>
+    </div>
+
+    <div id="stage">
+      <div id="empty"><b>Chưa có video</b>Bấm "Chọn video" hoặc dán link phía trên</div>
+      <div id="vwrap" style="display:none">
+        <video id="video" preload="metadata"></video>
+        <div id="layers"></div>
+      </div>
+    </div>
+
+    <div id="scrub" onclick="seekBar(event)"><i></i><b></b></div>
+
+    <div id="transport">
+      <div class="tinfo">Frame <b id="fnum">—</b><br><b id="tcur">00:00:00</b> / <span id="tdur">00:00:00</span></div>
+      <div class="rgninfo" id="rgninfo">Chưa chọn vùng nào</div>
+      <div class="spacer"></div>
+      <button class="btn sm" onclick="jump(-5)">−5s</button>
+      <button class="btn sm" onclick="stepLine(-1)">◀ Dòng trước</button>
+      <button class="btn pri sm" id="play" onclick="togglePlay()" style="width:40px">▶</button>
+      <button class="btn sm" onclick="stepLine(1)">Dòng sau ▶</button>
+      <button class="btn sm" onclick="jump(5)">+5s</button>
+      <span class="stat">Thu phóng</span>
+      <input type="range" id="zoom" min="40" max="100" value="100" oninput="applyZoom()">
+    </div>
+
+    <div id="tracks">
+      <div class="trow"><div class="tlab">ĐOẠN GIỮ</div><div class="tline" id="trkCut"></div></div>
+      <div class="trow"><div class="tlab">SUB VIỆT</div><div class="tline" id="trkSub"></div></div>
+      <div class="trow"><div class="tlab">GIỌNG TTS</div><div class="tline" id="trkTts"></div></div>
+      <div class="trow"><div class="tlab">VÙNG MỜ</div><div class="tline" id="trkRgn"></div></div>
+    </div>
+  </div>
+
+  <!-- RIGHT -->
+  <div id="right">
+    <div id="tabs">
+      <button class="btn" data-t="blur" onclick="setTab('blur')">Làm mờ</button>
+      <button class="btn on" data-t="sub" onclick="setTab('sub')">Phụ đề</button>
+      <button class="btn" data-t="logo" onclick="setTab('logo')">Logo</button>
+      <button class="btn" data-t="cut" onclick="setTab('cut')">Cắt video</button>
+      <button class="btn" data-t="asr" onclick="setTab('asr')">Nhận dạng</button>
+      <button class="btn" data-t="tr" onclick="setTab('tr')">Dịch</button>
+      <button class="btn" data-t="tts" onclick="setTab('tts')">Giọng đọc</button>
+      <button class="btn" data-t="export" onclick="setTab('export')">Xuất file</button>
+    </div>
+    <div id="panel"></div>
+  </div>
+</div>
+
+<!-- ============ CHẾ ĐỘ 2: VIDEO KỂ CHUYỆN ============ -->
+<div id="storyMain" style="display:none">
+  <div id="sLeft">
+    <div class="lhead"><span>KHO ẢNH</span><span id="simgcount">0 ảnh</span></div>
+    <div id="simgs"></div>
+    <div class="lfoot">
+      <button class="btn" onclick="storyAddImgs()">+ Thêm ảnh</button>
+      <div style="display:flex;gap:6px">
+        <button class="btn sm" style="flex:1" onclick="storyAddFolder()">+ Thư mục ảnh</button>
+        <button class="btn sm" style="flex:1" onclick="storyClearImgs()">Xoá hết</button>
+      </div>
+    </div>
+  </div>
+  <div id="sCenter">
+    <div id="sstageWrap"><div id="sstage"></div></div>
+    <div id="sinfo" class="hint" style="margin:0 12px 10px"></div>
+  </div>
+  <div id="sRight"><div id="spanel"></div></div>
+</div>
+
+<div id="bot">
+  <button class="btn pri" id="runbtn" onclick="runAll()">▶ CHẠY TẤT CẢ</button>
+  <button class="btn danger" onclick="cancelRun()">Huỷ</button>
+  <div id="pwrap">
+    <div id="ptext"><b id="pstep">Sẵn sàng</b><span id="pdetail"></span></div>
+    <div id="pbar"><i></i></div>
+  </div>
+  <div class="stat"><b id="ppct">0%</b></div>
+  <div class="stat">GPU <b id="gpu">—</b></div>
+</div>
+
+<div id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
