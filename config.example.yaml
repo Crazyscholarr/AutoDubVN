@@ -1,0 +1,297 @@
+# ============================================================================
+#  AutoDubVN - Cấu hình. Sửa file này rồi chạy run.bat (không cần đụng code).
+# ============================================================================
+
+# Thư mục chứa ffmpeg.exe/ffprobe.exe (nên dùng bản STATIC để tránh lỗi DLL/WDAC).
+# Để "" nếu ffmpeg đã có sẵn trong PATH. Ví dụ: "D:\\ffmpeg\\bin"
+ffmpeg_dir: ''
+
+download:                          # Khi nhập LINK (Bilibili/YouTube...) thay vì file
+  quality: best                    # best | 1080 | 720 | 480 | 360
+  concurrent_fragments: 8          # Tải nhiều mảnh video song song. 8 thường nhanh/ổn; mạng mạnh thử 12-16.
+  external_downloader: auto        # auto = downloader nội bộ ổn định | aria2c = ép dùng aria2c | none = tắt tăng tốc
+  # Bilibili công khai dùng bộ tải API/CDN trực tiếp, không cần mở trình duyệt.
+  # Cookie chỉ cần khi muốn độ nét/nội dung bị Bilibili khóa sau đăng nhập.
+  cookies_from_browser: null       # null | edge:Default | chrome | firefox
+  cookies_file: null               # hoặc đường dẫn file cookies.txt
+
+translation:
+  provider: "nvidia"                     # browser | gemini | nvidia | tokenrouter | tokenrouter_gemini | inferx
+  browser_channel: msedge          # msedge (Edge) | chrome | chromium
+  browser_profile: browser_profile # Thư mục nhớ đăng nhập (đăng nhập Gemini 1 lần là xong)
+  chunk_size: 15                   # TokenRouter free nen de 10-20; browser/Gemini co the tang cao hon
+  wait_reply: 120                  # (browser) Giây chờ Gemini trả lời tối đa mỗi lượt
+  chars_per_sec: 18.0                # Viết gọn để TTS còn bám hình; 0 = dịch dài đủ nghĩa nhất.
+                                    # Giọng CapCut BV421 đo thực đọc ~20 ký tự/giây nên 18 vẫn an
+                                    # toàn; để 15 bản dịch bị ép ngắn quá, thoại Việt chỉ phủ ~67%
+                                    # thời lượng gốc -> nhiều khoảng lặng, nghe như lệch tiếng.
+                                    # Nếu nhiều câu bị cắt ở sync strict, giảm còn 12-13 rồi XOÁ
+                                    # file .vi.srt để dịch lại (bản cũ vẫn được dùng lại nếu còn).
+  shorten_long_lines: true         # Dòng nào dịch ra dài hơn nhịp lồng tiếng thì hỏi lại model
+                                    # để rút gọn vừa đủ. ĐÂY LÀ THỨ CHỮA LỖI "tiếng chạy trước
+                                    # hình": không có nó, câu tiếng Việt dài gấp rưỡi ô thời gian
+                                    # nên TTS phải đọc nhanh 1.6x rồi cắt cụt, thoại kết thúc sớm
+                                    # hơn hình và khoảng lặng rải khắp video.
+                                    # Đánh đổi: mỗi lô tốn thêm 1 lượt hỏi nên dịch lâu hơn.
+                                    # Đặt false nếu ưu tiên tốc độ hơn độ khớp.
+  split_on_punctuation: true       # Tách phụ đề GỐC theo dấu kết câu mạnh: . ? ! 。？！ …
+  merge_source_fragments: true     # Gom mảnh ASR bị cắt giữa ý trước khi dịch: "năng" + "lực", "Nguy" + "Ma"
+  source_merge_max_chars: 180      # Tối đa ký tự của 1 câu/ý đưa sang Gemini
+  source_merge_min_chars: 24       # Mảnh chưa hết câu ngắn hơn mức này sẽ cố gom với dòng sau
+  source_merge_max_gap: 1.2        # Chỉ gom nếu hai mảnh cách nhau không quá số giây này
+  source_merge_max_duration: 18.0  # Không gom thành một unit quá dài, trừ mảnh nối cực ngắn
+  split_translated_on_punctuation: false # Không tách bản dịch Việt lần hai để tránh voice/sub chạy vụn và nhanh hơn hình.
+  polish_subtitles: true           # Gom mảnh bị cắt ngu, bỏ dấu ba chấm nối câu, rồi chia lại sub Việt theo ý câu
+  polish_max_chars: 125            # Dòng dài hơn mức này sẽ ưu tiên tách ở dấu câu thật
+  polish_min_chars: 24             # Mảnh quá ngắn sẽ được gom với câu cạnh bên nếu còn vừa
+  polish_min_gap: 0.04             # Khoảng hở nhỏ giữa các dòng sau khi chia lại
+  reset_every: 10                  # (browser) Cứ ngần này lượt thì mở đoạn chat mới
+                                    # cho nhẹ ngữ cảnh (Gemini càng dài càng chậm/lạc đề)
+  gemini_api_key: "YOUR_GEMINI_API_KEY_HERE"              # Không dùng API. Khi provider: browser, chương trình dùng Gemini trong trình duyệt.
+  gemini_model: "gemini-3.1-flash"   # Tên model Gemini API stable mới; code tự fallback nếu key chưa được cấp model này
+  tokenrouter_api_key: "YOUR_TOKENROUTER_API_KEY_HERE"          # Dien key TokenRouter khi provider: tokenrouter
+  tokenrouter_base_url: "https://api.tokenrouter.com/v1"
+  tokenrouter_model: "moonshotai/kimi-k3-free"
+  tokenrouter_timeout: 420         # giay cho moi request TokenRouter
+  tokenrouter_gemini_api_key: "YOUR_TOKENROUTER_GEMINI_API_KEY_HERE"
+  tokenrouter_gemini_base_url: "https://api.tokenrouter.com/v1beta/models"
+  tokenrouter_gemini_model: "google/gemini-3.6-flash"
+  tokenrouter_gemini_timeout: 420
+  inferx_api_key: "YOUR_INFERX_API_KEY_HERE"
+  inferx_base_url: "https://model.inferx.net/endpoints/v1"
+  inferx_model: "deepseek-v4-flash"
+  inferx_timeout: 420
+  # NVIDIA NIM (build.nvidia.com): key nvapi-... FREE, không cần thẻ, MỘT key
+  # dùng chung cho mọi model trong catalog - đổi model chỉ cần sửa nvidia_model.
+  # GLM-5.2 dịch Trung-Việt tốt nhất nhóm free (đúng xưng hô, thuật ngữ tiên hiệp).
+  nvidia_api_key: "YOUR_NVIDIA_API_KEY_HERE"
+  nvidia_base_url: "https://integrate.api.nvidia.com/v1"
+  nvidia_model: "z-ai/glm-5.2"     # thử model khác: openai/gpt-oss-120b, stepfun-ai/step-3.7-flash...
+  nvidia_timeout: 420
+  male_lead_name: ""               # De trong = khong ep ten nhan vat
+  female_lead_name: ""             # De trong = khong ep ten nhan vat
+  reuse_existing: true             # Có sẵn file .vi.srt thì dùng lại, khỏi dịch lại
+  auto_retranslate: true           # Lô dịch trả thiếu dòng nào (còn nguyên tiếng Trung) thì
+                                    # TỰ dịch lại đúng dòng đó (tối đa 2 lần) ngay sau bước Dịch
+                                    # và trước TTS/xuất video - khỏi phải bấm chạy lại bằng tay.
+                                    # false = dừng và báo lỗi như trước.
+
+asr:
+  # paraformer      = FunASR Paraformer-large: TỐT NHẤT CHO TIẾNG TRUNG (CER ~1.7%
+  #                   vs Whisper ~10%), timestamp câu gốc, ~2GB VRAM, an toàn file 3 tiếng.
+  #                   File dài hơn 3 tiếng sẽ tự chia 30 phút/đoạn để tránh empty result.
+  # faster-whisper  = đa ngôn ngữ, đã bật temperature fallback + VAD Silero có đệm thật.
+  # sensevoice      = rất nhanh nhưng timestamp thô.
+  # whisperx        = KHÔNG khuyên dùng (hay mất đoạn giữa ở video dài).
+  backend: paraformer
+  fallback_backend: faster-whisper # Tự chuyển sang cái này nếu backend chính lỗi
+  model_size: large-v3             # Chỉ dùng cho faster-whisper/whisperx
+  source_language: null            # null = tự nhận diện; "zh" tiếng Trung; "en"; "ja"...
+  device: cpu                      # cpu ổn định trên máy bật Application Control/WDAC; cuda dễ bị chặn DLL
+  compute_type: int8               # int8 cho CPU/tiết kiệm RAM; float16 chỉ nên dùng khi CUDA không bị chặn
+  batch_size: 8                    # CPU ổn định hơn; nếu bật lại CUDA có thể tăng 16-24
+  loudnorm: true                   # Chuẩn hoá âm lượng trước khi nhận -> VAD đỡ bỏ sót
+  reuse_existing: true             # Có sẵn <tên>.src.srt thì dùng lại cho nhanh. Muốn bốc lại video lỗi thì xoá riêng file .src.srt đó.
+
+  # ----- CHỐNG MẤT ĐOẠN (quan trọng với video dài) -----
+  rescue_gaps: true                # Tự dò khoảng trống dài rồi nhận diện lại đoạn đó
+  min_gap_seconds: 10               # Gap toi thieu (giay) de rescue. 10 bat nhieu doan sot hon 25 cu
+  max_rescue_rounds: 3             # 3 vong va (tang tu 2) de bat nhieu doan sot hon
+  silence_db: -45                  # Dưới mức này coi là im lặng -> không vá
+  audio_gap_rescue: true           # Dò cả vùng có tiếng nhưng chưa có sub; bắt các câu ngắn bị sót
+  speech_gap_seconds: 1.2          # Vùng có tiếng không sub dài >= mức này sẽ được cắt ra nhận lại
+  speech_silence_db: -42           # Ngưỡng im lặng cho ffmpeg silencedetect; tăng lên -38 nếu nhạc nền bị bắt nhầm
+  speech_min_silence: 0.35         # Khoảng lặng tối thiểu để tách cụm tiếng nói
+  min_coverage: 0.35               # Dưới ngưỡng này thì cảnh báo nghi mất đoạn
+  filter_hallucinations: true      # Bỏ câu BỊA Whisper hay chèn vào đoạn nhạc/im lặng
+                                    # ("Hãy subscribe cho kênh...", "请不吝点赞订阅...")
+
+  # ----- SỬA LỖI NGHE NHẦM (rất hiệu quả với phim bộ nhiều tập) -----
+  # ASR nghe sai DANH XƯNG/TÊN RIÊNG y hệt nhau suốt cả bộ. Khai một lần ở đây
+  # là mọi tập đều đúng. Vế PHẢI (bản đúng) còn được mớm sẵn cho Whisper trước
+  # khi nhận diện, nên nhiều khi nó nghe đúng ngay từ đầu.
+  #   - Không phân biệt hoa/thường.
+  #   - Muốn dùng biểu thức chính quy thì bắt đầu bằng 're:'
+  # Sửa xong chạy lại chương trình: file .src.srt cũ cũng được sửa luôn.
+  corrections:
+    "tiểu xoái ta": "tiểu soái ca"
+    "tiểu xoái": "tiểu soái"
+  #   "re:\bxoái\b": "soái"
+
+  # Gợi ý từ vựng thêm cho ASR (tên nhân vật, địa danh, thuật ngữ trong phim).
+  # Càng sát nội dung càng đỡ nghe nhầm. Để null nếu không cần.
+  vocab_hint: null                 # vd: "Giang Tam. Hạo Nguyệt. tiểu soái ca. thần tuyển."
+
+diarization:
+  enabled: false                  # turbo: tat tach nhan vat de nhanh hon
+  # CHỈ bước tách nhân vật này mới cần token HuggingFace (model pyannote bắt
+  # đăng nhập + bấm đồng ý điều khoản). ASR và TTS KHÔNG cần token nào cả.
+  hf_token: ""                     # Tạo miễn phí tại https://huggingface.co/settings/tokens
+  num_speakers: null               # null = tự đoán; hoặc điền số nhân vật cố định
+
+tts:
+  engine: capcut                   # edge | vieneu | capcut
+                                    # vieneu (VieNeu-TTS mã nguồn mở, chạy LOCAL, giọng tự
+                                    # nhiên hơn hẳn + nhiều giọng dựng sẵn thật - cần cài
+                                    # trước: pip install vieneu, xem README mục "Giọng nói").
+  base_rate: "+0%"                 # tốc độ đọc tự nhiên; tăng nhẹ nếu bản Việt bị trễ hình
+  max_speed: 1.6                   # trần tăng tốc; sync strict cần cao hơn để ít phải cắt câu dài
+  min_gap: 0.02                    # Khoảng nghỉ tối thiểu giữa 2 câu (giây)
+  sync_offset_seconds: 0.0         # Dương = voice/sub Việt xuất hiện trễ hơn hình; âm = sớm hơn.
+  sync_mode: strict                # strict = bám timestamp gốc từng câu, không để drift tích luỹ theo cụm thoại
+  trim_overflow: true              # Nếu câu vẫn dài hơn slot dù đã tăng tốc, cắt đuôi clip đó thay vì kéo lệch 20-30s
+  max_overhang_seconds: 0.75       # Giọng chỉ được đọc quá `end` của phụ đề tối đa bấy nhiêu giây,
+                                    # DÙ phía sau có bao nhiêu im lặng. Trước đây phần mượn im lặng
+                                    # là vô hạn nên câu sub 3s + 50s lặng => slot 50s, TTS đọc 25s
+                                    # vẫn "vừa slot", không tăng tốc, không cắt => đè hình 22s.
+                                    # 0 = bám chặt end gốc (cắt nhiều hơn); 0.5-1.0 là vùng tự nhiên.
+  recover_drift: false             # false = không tự tăng tốc để kéo timeline; tránh voice/sub chạy trước hình
+                                    # độ trễ tích luỹ (thoại tụt lại phía sau hình), thay vì
+                                    # chỉ tránh trễ thêm. Tắt nếu muốn giọng đọc đều nhất có thể.
+  concurrency: 10                  # turbo: so luong job TTS song song
+  max_retries: 2                   # turbo: giam retry de khong treo lau khi API loi
+  retry_delay: 1.2                 # Độ trễ nền (giây) trước lần thử lại, tăng dần theo cấp số nhân
+  trim_silence: true               # cắt lặng thừa từng clip để giảm trễ tích luỹ
+                                    # sinh ra (~170 câu/tập dồn lại tới hàng chục giây)
+  voice_mode: narrator             # narrator (1 giọng) | alternate (nam/nữ luân phiên) | per-speaker (theo diarization)
+  narrator_voice: vi-VN-NamMinhNeural   # Giọng kể mặc định (engine "edge"): vi-VN-NamMinhNeural | vi-VN-HoaiMyNeural
+  narrator_pitch: "+0Hz"
+  vieneu_voice: null                # Chỉ dùng khi engine: vieneu. null = giọng mặc định của
+                                    # model; hoặc điền đúng tên 1 giọng dựng sẵn (xem log khi
+                                    # chạy, hoặc gọi model.list_preset_voices() để xem hết).
+  vieneu_options:                   # Tuỳ chọn nâng cao cho VieNeu-TTS (engine: vieneu).
+    offline: auto                   # auto = model đã tải về máy thì KHÔNG gọi mạng nữa
+    device: auto                    # auto | cuda | cpu
+    backend: onnx                   # pytorch (mặc định) | onnx (nhanh hơn 3-5× trên CPU)
+    precision: int8                 # chỉ cho ONNX: int8 (nhanh nhất) | fp32 (chất lượng cao hơn)
+  vieneu_voices: null               # Chỉ dùng khi engine: vieneu + voice_mode alternate/per-speaker.
+                                    # null = tự lấy toàn bộ giọng dựng sẵn của model; hoặc điền
+                                    # danh sách tên giọng cụ thể, vd: ["Bình An", "Xuân Vĩnh", "Ngọc Linh"]
+  capcut_voice: BV421_vivn_streaming # Chỉ dùng khi engine: capcut. Xem dropdown GUI hoặc tools/capcut-tts-api/Voice.json.
+  capcut_options:
+    concurrency: 10                 # turbo: neu bi rate-limit thi ha xuong 8 hoac 6
+    max_concurrency: 12             # tran mem trong code
+    timeout: 60                     # turbo: timeout ngan hon cho tung cau
+    poll_interval: 0.5
+    reuse_existing: true            # cache theo noi dung+giong+toc do
+    fallback_concurrency: 2         # voice vai phu loi thi doc lai bang giong ke, ha luong cho on dinh
+    fallback_max_retries: 3
+    rate: null                      # null = tự đổi từ base_rate (+5% -> 1.05). Có thể đặt "1.0".
+    device_json: null               # Tuỳ chọn nâng cao cho K07VN/capcut-tts-api.
+    kuwacom_api_url: null           # Nếu chạy kuwacom/CapCut-TTS server, vd http://127.0.0.1:8080.
+
+# Công cụ viết truyện độc lập. Đường dẫn tương đối được tính từ thư mục AutoDubVN.
+# Luồng một nút ở giao diện: tiêu đề -> KICH_BAN_DOC.txt -> giọng/nhạc/sub/video.
+tao_kich_ban:
+  tool_dir: "../Tạo kịch bản"
+  python: null                      # null = dùng cùng Python đang chạy AutoDubVN
+  timeout_minutes: 180              # 6 chương + kiểm tra có thể mất khá lâu
+  require_quality_pass: true        # Chưa đủ từ/đối thoại hoặc có từ cấm thì chưa tốn TTS/render
+
+# Tạo ảnh cho luồng một nút: tiêu đề -> truyện -> prompt -> ảnh -> video.
+# Mặc định dùng Gemini Pro đã đăng nhập bằng login_gemini.bat: app tự chọn Tạo
+# hình ảnh, gửi từng prompt, chờ và tải đủ ảnh; không cần API key. Đăng nhập xong
+# phải đóng cửa sổ Edge của file BAT để profile không bị khóa.
+# Muốn dùng API thì đổi provider thành api và khai báo gemini_api_key.
+tao_anh:
+  provider: browser
+  auto_generate: true
+  scene_count: 14
+  browser_url: https://gemini.google.com/app
+  browser_channel: msedge
+  browser_profile: browser_profile
+  wait_image_seconds: 90             # có nhịp báo mỗi 8 giây; kẹt thì dừng sớm
+  wait_prompt_seconds: 180
+  browser_retries: 2                 # lượt 2 tự mở chat sạch, không treo 12 phút
+  gemini_image_model: gemini-3.1-flash-lite-image
+  timeout_seconds: 180
+  max_retries: 3
+  request_gap_seconds: 1.5
+
+# ─── Làm video kể chuyện từ file truyện TXT ──────────────────────────────────
+# Luồng: file .txt -> giọng đọc -> trộn nhạc nền -> ghép với ảnh (hoặc video sẵn có).
+nhac_nen:
+  muc_db: -38                      # Mức nhạc nghe thấy, tính theo dBFS trung bình.
+                                    # -40 gần như chỉ để lấp khoảng lặng, -35 nghe rõ
+                                    # hơn chút, -30 trở lên là bắt đầu tranh với giọng.
+                                    # Chương trình tự đo từng bài rồi bù về đúng mốc
+                                    # này, nên bài thu to hay nhỏ đều ra như nhau.
+  duck: true                       # Nhạc tự lùi lại mỗi khi có lời, hết lời thì trở lại.
+  duck_ratio: 8                    # Lùi mạnh hay nhẹ. 4 = nhẹ, 8 = vừa (hạ chừng 10-12 dB),
+                                    # 16 = nhạc gần như tắt hẳn lúc đang đọc.
+  fade: 2.0                        # Số giây nhạc vào đầu và tắt cuối cho êm tai.
+  tu_dong_tai: true                # Chưa có nhạc trong máy thì tự tải về.
+  so_bai_tai: 3                    # Tải sẵn mấy bài để có cái mà đổi.
+  # Nhạc lấy từ Wikimedia Commons, CHỈ nhận bài CC0/Public Domain nên dùng
+  # thương mại thoải mái. Nguồn và tác giả từng bài ghi trong
+  # assets/nhac_nen/nguon.json. Muốn dùng nhạc riêng thì cứ bỏ file vào
+  # assets/nhac_nen/ là xong, không cần khai báo gì thêm.
+  danh_muc:                        # Danh mục trên Commons để tìm nhạc.
+    - Ambient music
+    - Musopen
+    - Piano music
+    - Classical music
+
+slideshow:                         # Dựng video từ ảnh khi không có sẵn video
+  w: 1920
+  h: 1080
+  fps: 30
+  kieu: chuyen_dong                # chuyen_dong = ảnh trôi và phóng chậm (Ken Burns).
+                                    # tinh = ảnh đứng yên, dựng nhanh hơn nhiều.
+                                    # Ảnh không đúng tỉ lệ khung sẽ được đặt giữa,
+                                    # hai bên lấp bằng chính ảnh đó làm nền mờ.
+
+video:
+  blur_bottom_ratio: 0.0           # 0 = không che (render CỰC NHANH, copy video). 0.18 = che mờ 18% dải đáy (sub gốc)
+  blur_strength: 20
+  regions: []                      # Vùng phủ nâng cao, có thể giới hạn thời gian.
+                                    # Ví dụ che 5 phút đầu:
+                                    # - {type: blur, x: 0, y: 850, w: 1920, h: 180, strength: 22, start: 0, end: 300}
+  delogo: null                     # Xoá logo cháy cứng ở góc. null = không. Định dạng "x:y:w:h" (pixel), vd "1600:40:280:90"
+  keep_original_db: -30            # ÂM LƯỢNG NỀN GỐC theo dB: -60 = gần như im, -30 = nền nhỏ, 0 = nguyên âm lượng.
+  keep_original_muted: false       # true = tắt hẳn tiếng gốc, chỉ giữ track lồng tiếng.
+  hardsub_vietnamese: false        # turbo: tat ghi sub len hinh de copy video
+  subtitle_style:                  # Kiểu chữ phụ đề (chỉ dùng khi hardsub bật)
+    font: Arial
+    size: 22                       # Cỡ chữ (video 1080p nên để 24-28)
+    color: "#FFE14D"               # MÀU CHỮ - mã như trên web (#RRGGBB)
+    outline_color: "#000000"       # Màu viền
+    outline: 2                     # Độ dày viền (0 = không viền)
+    shadow: 0                      # Độ đổ bóng
+    bold: true
+    italic: false
+    align: mid-center              # Canh giữa khung hình
+    box: false                     # true = nền hộp đặc sau chữ thay vì viền
+    margin_bottom: 30              # Khoảng lề phụ đề khi không dùng hộp kéo-thả
+    min_duration: 0.9              # Sub hiện tối thiểu bao lâu cho một cụm ngắn
+    max_duration: 6.5              # Khi sau đó im lặng dài, không để một câu treo quá lâu
+    read_cps: 14                   # Ước lượng tốc độ đọc chữ khi chưa có voice_duration
+    tail_pad: 0.08                 # Giữ sub thêm rất ngắn sau voice; tránh dính câu khi thoại sát nhau
+    single_line: true              # Chỉ hiển thị 1 dòng, không xuống 2-3 dòng; câu dài sẽ co ngang để vừa khung
+    animation: fade_pop            # none | fade | fade_pop. fade_pop mượt, không lấn câu kế.
+    fade_in_ms: 80
+    fade_out_ms: 60
+    min_gap_between_lines: 0.03    # Khoảng hở tối thiểu giữa 2 câu sub sát nhau
+  use_gpu: true                    # Dùng h264_nvenc (RTX 3060) để render nhanh
+  x264_preset: superfast           # Khi không dùng được GPU: ultrafast | superfast | veryfast | faster
+                                    # superfast nhanh hơn veryfast, file có thể lớn hơn chút nhưng ổn định.
+  cpu_threads: 4                   # Fallback CPU chi dung toi da 4 thread de may khong bi keo 80-100%.
+  try_h264_mf: false               # Không khuyến nghị. h264_mf của Windows hay lỗi 4294967274;
+                                    # false = bỏ qua, dùng CPU x264 ổn định khi NVENC không chạy.
+  render_backend: auto             # auto | ffmpeg | mp4box. mp4box chỉ dùng khi chỉ thay audio, không trộn nền/blur/hardsub.
+  render_chunked: false            # true = chia render video dài thành nhiều phần rồi tự ghép lại
+  render_chunk_minutes: 120        # Mỗi phần bao nhiêu phút khi render_chunked=true. 120 = 2 tiếng/phần.
+  audio_mix_mode: ffmpeg           # ổn định trên máy bật Application Control/WDAC; không import torch DLL
+  audio_mix_chunk_seconds: 120     # FFmpeg fallback trộn theo mảnh ngắn; tránh sinh WAV trung gian nhiều GB
+  force_h264: false                # turbo: copy codec goc neu khong can render lai
+                                    # HEVC/H.265 - Windows Photos KHÔNG mở được
+                                    # ("format is currently unsupported"). Đặt false
+                                    # nếu bạn muốn giữ nguyên nguồn cho nhanh và
+                                    # dùng trình phát riêng (VLC, MPC-HC, PotPlayer).
+
+output:
+  dir: output                      # Thư mục kết quả (bên trong AutoDubVN)
+  suffix: ".vietsub_dub"           # Đuôi thêm vào tên file cuối:
+                                    #   "<tên gốc><suffix>.mp4"
+                                    # Để "" thì file ra trùng đúng tên gốc.
+  keep_temp: false                 # true = giữ file tạm (audio, clip) để kiểm tra

@@ -142,6 +142,90 @@ def _open_dialog(kind: str, multiple: bool, types):
     return list(r) if r else []
 
 
+def _paste_clipboard_into_gemini(delay_seconds: float = 5.5) -> bool:
+    """Đưa focus vào ô prompt Gemini/AI Studio trên Edge rồi gửi Ctrl+V."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        time.sleep(max(1.0, float(delay_seconds)))
+        user32 = ctypes.windll.user32
+        handles = []
+        enum_proc_type = ctypes.WINFUNCTYPE(
+            wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.restype = wintypes.BOOL
+        user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        user32.GetWindowTextLengthW.restype = ctypes.c_int
+        user32.GetWindowTextW.argtypes = [
+            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        user32.GetWindowTextW.restype = ctypes.c_int
+        user32.IsIconic.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.GetWindowRect.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+
+        def _collect(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(hwnd, buf, n + 1)
+            title = buf.value.casefold()
+            if ("gemini" in title or "ai studio" in title or
+                    "aistudio.google.com" in title):
+                handles.append((hwnd, title))
+            return True
+
+        # Trang có thể tải chậm; tìm cửa sổ thêm vài giây thay vì dán vào app cũ.
+        deadline = time.monotonic() + 12.0
+        callback = enum_proc_type(_collect)
+        while not handles and time.monotonic() < deadline:
+            user32.EnumWindows(callback, 0)
+            if not handles:
+                time.sleep(0.8)
+        if not handles:
+            return False
+
+        hwnd, window_title = handles[0]  # Tab vừa mở thường ở đầu thứ tự Z.
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        # Một lần bấm Alt giúp SetForegroundWindow được Windows chấp nhận ổn định.
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 0x0002, 0)
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.25)
+
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+        width, height = rect.right - rect.left, rect.bottom - rect.top
+        if width < 500 or height < 500:
+            return False
+        # Gemini chat mới đặt ô nhập giữa màn hình; AI Studio đặt sát đáy.
+        if "gemini" in window_title and "ai studio" not in window_title:
+            x = rect.left + int(width * 0.58)
+            y = rect.top + int(height * 0.53)
+        else:
+            x = rect.left + int(width * 0.47)
+            y = rect.bottom - max(50, min(90, int(height * 0.045)))
+        user32.SetCursorPos(x, y)
+        user32.mouse_event(0x0002, 0, 0, 0, 0)  # LEFTDOWN
+        user32.mouse_event(0x0004, 0, 0, 0, 0)  # LEFTUP
+        time.sleep(0.35)
+        user32.keybd_event(0x11, 0, 0, 0)       # CTRL down
+        user32.keybd_event(0x56, 0, 0, 0)       # V down
+        user32.keybd_event(0x56, 0, 0x0002, 0)  # V up
+        user32.keybd_event(0x11, 0, 0x0002, 0)  # CTRL up
+        return True
+    except Exception:
+        return False
+
+
 class Api:
     """Cầu nối cho JavaScript gọi xuống Python (hộp thoại file, điều khiển cửa sổ).
 
@@ -201,6 +285,48 @@ class Api:
         except Exception:
             return False
 
+    def open_url(self, url: str):
+        """Mở trang ngoài (ví dụ AI Studio) bằng trình duyệt mặc định."""
+        try:
+            import webbrowser
+            target = str(url or "").strip()
+            if not target.startswith(("https://", "http://")):
+                return False
+            return bool(webbrowser.open(target))
+        except Exception:
+            return False
+
+    def open_url_and_paste(self, url: str, text: str):
+        """Mở Gemini/AI Studio bằng browser đã đăng nhập rồi tự dán prompt."""
+        target = str(url or "").strip()
+        if not target.startswith(("https://gemini.google.com/",
+                                  "https://aistudio.google.com/")):
+            return {"opened": False, "copied": False, "paste_scheduled": False}
+        copied = self.copy_text(text)
+        opened = self.open_url(target)
+        # webbrowser.open đôi khi trả False dù Edge vẫn đã nhận lệnh mở tab.
+        scheduled = bool(copied and os.name == "nt")
+        if scheduled:
+            threading.Thread(
+                target=_paste_clipboard_into_gemini,
+                kwargs={"delay_seconds": 5.5}, daemon=True).start()
+        return {"opened": bool(opened), "copied": bool(copied),
+                "paste_scheduled": scheduled}
+
+    def copy_text(self, text: str):
+        """Sao chép chắc chắn trong app desktop khi Clipboard API bị WebView chặn."""
+        try:
+            import tkinter
+            root = tkinter.Tk()
+            root.withdraw()
+            root.clipboard_clear()
+            root.clipboard_append(str(text or ""))
+            root.update()  # giữ dữ liệu sau khi cửa sổ tạm bị huỷ
+            root.destroy()
+            return True
+        except Exception:
+            return False
+
     # ---------------- điều khiển cửa sổ (thanh tiêu đề tự vẽ) ----------------
     def win_minimize(self):
         try:
@@ -247,6 +373,11 @@ def main() -> int:
 
     from autodub import server
     from autodub.utils import log
+
+    # Hiển thị nguồn chạy ngay khi khởi động để không nhầm shortcut/bản copy
+    # cũ (đặc biệt khi đã có nhiều thư mục AutoDubVN trên máy).
+    log(f"Build story-random-resume 2026-08-21.3 · nguồn: {ROOT}", "dim")
+    log(f"Python runtime: {sys.executable}", "dim")
 
     port = _free_port()
     url = f"http://127.0.0.1:{port}/"

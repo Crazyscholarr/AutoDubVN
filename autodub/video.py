@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import List, Optional, Sequence, Dict
 
 from .utils import (log, run, ffprobe_duration, has_nvenc, has_cuda_decode,
@@ -456,7 +457,8 @@ _CONCAT_BATCH = 48
 
 
 def _concat_audio_chunks(chunk_files: Sequence[str], out_path: str, sr: int,
-                         work_dir: str) -> str:
+                         work_dir: str,
+                         normalize_loudness: bool = False) -> str:
     chunk_files = [p for p in chunk_files if p and os.path.exists(p)]
     if not chunk_files:
         run(["ffmpeg", "-y", "-f", "lavfi", "-t", "0.2",
@@ -474,9 +476,13 @@ def _concat_audio_chunks(chunk_files: Sequence[str], out_path: str, sr: int,
             for gi in range(0, len(chunk_files), _CONCAT_BATCH):
                 mid = os.path.join(td, f"tang_{gi // _CONCAT_BATCH:04d}.flac")
                 _concat_audio_chunks(chunk_files[gi:gi + _CONCAT_BATCH],
-                                     mid, sr, td)
+                                     mid, sr, td,
+                                     normalize_loudness=normalize_loudness)
                 mids.append(mid)
-            return _concat_audio_chunks(mids, out_path, sr, td)
+            # Các clip gốc đã được cân ở tầng dưới. Không loudnorm lại từng
+            # khối trung gian vì sẽ làm thay đổi mức giữa các nhóm 48 câu.
+            return _concat_audio_chunks(
+                mids, out_path, sr, td, normalize_loudness=False)
 
     inputs: List[str] = []
     chains: List[str] = []
@@ -484,8 +490,10 @@ def _concat_audio_chunks(chunk_files: Sequence[str], out_path: str, sr: int,
     for i, path in enumerate(chunk_files):
         inputs += ["-i", path]
         label = f"a{i}"
+        loudness = "loudnorm=I=-18:TP=-2:LRA=7," \
+            if normalize_loudness else ""
         chains.append(
-            f"[{i}:a]aresample={sr},"
+            f"[{i}:a]{loudness}aresample={sr},"
             "aformat=sample_fmts=s16:channel_layouts=stereo,"
             "asetpts=PTS-STARTPTS"
             f"[{label}]"
@@ -493,9 +501,14 @@ def _concat_audio_chunks(chunk_files: Sequence[str], out_path: str, sr: int,
         labels.append(f"[{label}]")
     graph = ";".join(chains)
     if len(chunk_files) == 1:
-        graph += f";{labels[0]}anull[out]"
+        graph += f";{labels[0]}anull[joined]"
     else:
-        graph += ";" + "".join(labels) + f"concat=n={len(chunk_files)}:v=0:a=1[out]"
+        graph += ";" + "".join(labels) + \
+            f"concat=n={len(chunk_files)}:v=0:a=1[joined]"
+    # loudnorm đôi khi trả cả clip ngắn trong một AVFrame lớn hơn 65.535 mẫu.
+    # FLAC không mã hoá được block lớn như vậy (thực tế đã gặp 69.104 mẫu ở
+    # nhóm 48 câu). Chia lại frame trước encoder; p=0 không chèn thêm im lặng.
+    graph += ";[joined]asetnsamples=n=4096:p=0[out]"
 
     try:
         run(["ffmpeg", "-y", *inputs, "-filter_complex", graph,
@@ -512,17 +525,21 @@ def _concat_audio_chunks(chunk_files: Sequence[str], out_path: str, sr: int,
 
 
 def concat_audio_clips(chunk_files: Sequence[str], out_path: str,
-                       sr: int = 48000) -> str:
+                       sr: int = 48000,
+                       normalize_loudness: bool = False) -> str:
     """Nối tuần tự các clip thoại và chuẩn hoá chúng về một track âm thanh.
 
     Hàm public này phục vụ cả timeline lồng tiếng lẫn công cụ tạo audio từ văn
     bản. Dùng filter concat thay vì ghép byte nên MP3/WAV/M4A đầu vào có thể
-    khác sample-rate hoặc số kênh.
+    khác sample-rate hoặc số kênh. ``normalize_loudness=True`` cân từng clip
+    về -18 LUFS, chặn đỉnh -2 dB trước khi nối; phù hợp khi nhiều giọng TTS có
+    mức âm đầu ra khác nhau.
     """
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     return _concat_audio_chunks(
         chunk_files, out_path, max(8000, int(sr or 48000)),
-        os.path.dirname(os.path.abspath(out_path)))
+        os.path.dirname(os.path.abspath(out_path)),
+        normalize_loudness=normalize_loudness)
 
 
 def _assemble_ffmpeg_chunked(
@@ -764,8 +781,9 @@ def _ffmpeg_sub_path(srt_path: str) -> str:
     """
     import shutil
     import tempfile
+    import uuid
     ext = os.path.splitext(srt_path)[1].lower() or ".srt"
-    safe = os.path.join(tempfile.gettempdir(), "autodub_hardsub" + ext)
+    safe = os.path.join(tempfile.gettempdir(), f"autodub_hardsub_{os.getpid()}_{uuid.uuid4().hex[:8]}{ext}")
     try:
         shutil.copyfile(srt_path, safe)
     except Exception:

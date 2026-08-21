@@ -16,8 +16,10 @@ import os
 import random
 import re
 import subprocess
+import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from typing import Dict, List, Optional
 
@@ -46,6 +48,15 @@ MIN_DURATION = 25.0
 TARGET_DB = -38.0
 DB_FLOOR = -60.0
 DB_CEIL = -10.0
+
+# Wikimedia sẽ trả 429 nếu duyệt cây danh mục quá dồn dập. Một lần bị chặn thì
+# ngưng hỏi trong 15 phút; video vẫn dùng nhạc đang có thay vì spam hàng chục
+# cảnh báo và làm thời gian chạy dài thêm.
+WIKIMEDIA_COOLDOWN_SECONDS = 15 * 60
+MAX_CATEGORY_REQUESTS = 10
+_WIKIMEDIA_BLOCKED_UNTIL = 0.0
+_WIKI_LOCK = threading.Lock()
+_FILE_LOCK = threading.Lock()
 
 
 def thu_muc_nhac(root: Optional[str] = None) -> str:
@@ -91,13 +102,14 @@ def _doc_nguon(folder: str) -> Dict[str, Dict]:
 
 
 def _ghi_nguon(folder: str, name: str, info: Dict) -> None:
-    data = _doc_nguon(folder)
-    data[name] = info
-    try:
-        with open(_duong_dan_nguon(folder), "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except OSError as e:
-        log(f"Không ghi được nguon.json: {e}", "warn")
+    with _FILE_LOCK:
+        data = _doc_nguon(folder)
+        data[name] = info
+        try:
+            with open(_duong_dan_nguon(folder), "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            log(f"Không ghi được nguon.json: {e}", "warn")
 
 
 def _giay_phep_hop_le(text: str) -> bool:
@@ -135,26 +147,49 @@ def _danh_muc_con(cat: str, limit: int = 8, timeout: float = 20.0) -> List[str]:
             "cmtitle": f"Category:{cat}",
             "cmtype": "subcat", "cmlimit": limit,
         }, timeout=timeout)
-    except Exception:
+    except Exception as exc:
+        if _bi_gioi_han_wikimedia(exc):
+            _tam_ngung_wikimedia()
         return []
     return [str(m.get("title") or "").removeprefix("Category:")
             for m in ((data.get("query") or {}).get("categorymembers") or [])]
 
 
+def _bi_gioi_han_wikimedia(exc: Exception) -> bool:
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 429
+
+
+def _tam_ngung_wikimedia() -> None:
+    global _WIKIMEDIA_BLOCKED_UNTIL
+    with _WIKI_LOCK:
+        _WIKIMEDIA_BLOCKED_UNTIL = max(
+            _WIKIMEDIA_BLOCKED_UNTIL, time.monotonic() + WIKIMEDIA_COOLDOWN_SECONDS)
+
+
 def tim_nhac_online(categories: Optional[List[str]] = None,
                     limit: int = 12,
                     timeout: float = 20.0,
-                    dao_sau: bool = True) -> List[Dict]:
+                    dao_sau: bool = True,
+                    max_category_requests: int = MAX_CATEGORY_REQUESTS) -> List[Dict]:
     """Hỏi Wikimedia Commons xem có bài nhạc CC0/PD nào dùng được.
 
     Không ghim sẵn đường dẫn bài hát nào cả: đường dẫn ghim cứng sẽ chết dần
     theo thời gian, còn hỏi thẳng danh mục thì luôn ra bản đang có thật.
     """
+    with _WIKI_LOCK:
+        blocked = time.monotonic() < _WIKIMEDIA_BLOCKED_UNTIL
+    if blocked:
+        log("Wikimedia đang trong thời gian nghỉ sau lỗi 429; dùng kho nhạc có sẵn.",
+            "info")
+        return []
+
     cats = list(categories or DEFAULT_CATEGORIES)
     found: List[Dict] = []
     seen = set()
     da_xet = set()
-    while cats and len(found) < limit:
+    max_category_requests = max(1, int(max_category_requests or MAX_CATEGORY_REQUESTS))
+    while (cats and len(found) < limit
+           and len(da_xet) < max_category_requests):
         cat = cats.pop(0)
         if cat in da_xet:
             continue
@@ -169,6 +204,11 @@ def tim_nhac_online(categories: Optional[List[str]] = None,
                 "iiprop": "url|size|mime|extmetadata",
             }, timeout=timeout)
         except Exception as e:
+            if _bi_gioi_han_wikimedia(e):
+                _tam_ngung_wikimedia()
+                log("Wikimedia tạm giới hạn lượt hỏi (HTTP 429); dừng tìm nhạc "
+                    "online và dùng kho nhạc có sẵn.", "warn")
+                break
             log(f"Không hỏi được danh mục nhạc \"{cat}\": {e}", "warn")
             continue
 
@@ -204,14 +244,22 @@ def tim_nhac_online(categories: Optional[List[str]] = None,
             if len(found) >= limit:
                 break
         if len(found) == truoc and dao_sau:
-            cats.extend(_danh_muc_con(cat, timeout=timeout))
+            # Chỉ lấy vài nhánh con. Danh mục "Classical music" có hàng trăm
+            # nhánh; duyệt hết vừa chậm vừa chắc chắn chạm rate-limit.
+            cats.extend(_danh_muc_con(cat, limit=4, timeout=timeout))
     return found
 
 
 def _ten_file_an_toan(name: str) -> str:
     safe = re.sub(r"[^\w\s.\-]", "", name, flags=re.UNICODE).strip()
     safe = re.sub(r"\s+", "_", safe)
-    return safe[:80] or f"nhac_{int(time.time())}"
+    stem, ext = os.path.splitext(safe)
+    # Cắt phần thân, không cắt mất .mp3/.flac như trước. File mất đuôi sẽ bị
+    # kho bỏ qua và chương trình hiểu nhầm là vẫn thiếu nhạc rồi tải tiếp.
+    if ext.lower() not in _AUDIO_EXT:
+        stem, ext = safe, ""
+    fallback = f"nhac_{int(time.time())}"
+    return ((stem[:max(1, 80 - len(ext))] or fallback) + ext)[:80]
 
 
 def tai_nhac(item: Dict, folder: Optional[str] = None,

@@ -39,3 +39,4 @@ tools/
 EOFlogin_gemini.bat
 
 /login_gemini.bat
+venv_py310_backup/

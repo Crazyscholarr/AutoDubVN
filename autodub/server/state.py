@@ -22,6 +22,7 @@ CONFIG_PATH = os.path.join(HERE, "config.yaml")
 _LOCK = threading.RLock()
 _NEXT_ID = [1]
 _CANCEL_EVENT = threading.Event()
+_DOWNLOAD_SEM = threading.Semaphore(3)  # giới hạn tải đồng thời
 set_cancel_event(_CANCEL_EVENT)
 
 STATE: Dict = {
@@ -40,6 +41,33 @@ STATE: Dict = {
         "script_path": "", "script_title": "", "script_words": 0,
         "recommended_voice": "", "voice_analysis": {},
         "voice_recommendations": [],
+        "voice_cast": [], "voice_assignment_coverage": 0.0,
+        "voice_cast_path": "",
+         "image_pack_path": "", "image_prompt_path": "",
+         "image_provider_url": "", "image_scene_count": 0,
+         "image_ready_count": 0, "image_prompt_ready": False,
+         "image_generation_status": "",
+        "source_keyword": "", "source_results": [], "source_catalog": [],
+        "source_links": [], "source_videos": [], "source_clips": [],
+        "source_status": "", "source_done": 0, "source_total": 0,
+        "reference_keyword": "", "reference_results": [],
+        "reference_status": "", "cut_status": "", "cut_done": 0, "cut_total": 0,
+    },
+    "downloads": [],          # [{id, url, status, progress, name, error}]
+    "download_active": 0,     # số lượng thread đang tải
+    "download_max": 3,        # giới hạn đồng thời (configurable)
+    # Công cụ phụ trợ tách hẳn khỏi project lồng tiếng/AI Story. Kết quả chỉ
+    # được đưa vào story khi người dùng chủ động bấm nút nhập ở giao diện.
+    "video_tools": {
+        "rev": 0, "working": False, "active": "", "error": "",
+        "download_status": "", "download_pct": 0.0,
+        "download_done": 0, "download_total": 0,
+        "download_files": [], "download_output_dir": "",
+        "search_keyword": "", "search_provider": "all",
+        "search_status": "", "search_results": [],
+        "cut_status": "", "cut_pct": 0.0,
+        "cut_done": 0, "cut_total": 0,
+        "cut_sources": [], "cut_files": [], "cut_output_dir": "",
     },
 }
 

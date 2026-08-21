@@ -7,6 +7,7 @@ khác (pipeline, render, projects, manual_api...). Endpoint nào chạy lâu đ�
 from __future__ import annotations
 
 import json
+import copy
 import mimetypes
 import os
 import re
@@ -19,7 +20,7 @@ from typing import Dict, Optional
 from .. import detect
 from ..utils import log, has_nvenc, cancel_running_processes
 from .state import (HERE, UI_DIR, STATE, PROJECTS, REV,
-                    _LOCK, _NEXT_ID, _CANCEL_EVENT,
+                    _LOCK, _NEXT_ID, _CANCEL_EVENT, _DOWNLOAD_SEM,
                     bump_rev, _log, _progress, _find)
 from .helpers import _cleanup_temp_files
 from .config_api import (_load_cfg, _translation_cfg_for_gui,
@@ -29,6 +30,7 @@ from .projects import get_project, _save_project_state
 from .render import render_preview
 from .pipeline import run_pipeline
 from . import manual_api
+from . import video_tools_api
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -137,6 +139,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "không thấy ảnh"}, 404)
             return self._file(raw)
 
+        if p == "/api/local_video":
+            # Xem trước video người dùng vừa chọn trong khung Kể chuyện.
+            raw = urllib.parse.unquote(q.get("path", [""])[0] or "")
+            ext = os.path.splitext(raw)[1].lower()
+            if ext not in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv",
+                           ".ts", ".m4v"}:
+                return self._json({"error": "chỉ phục vụ file video"}, 400)
+            if not os.path.isfile(raw):
+                return self._json({"error": "không thấy video"}, 404)
+            return self._file(raw)
+
         if p == "/api/state":
             # Phải THẬT NHẸ: giao diện gọi mỗi 1.2 giây. Không trả nội dung dự án
             # ở đây, chỉ trả số hiệu phiên bản để bên kia biết có cần tải lại không.
@@ -153,10 +166,14 @@ class Handler(BaseHTTPRequestHandler):
                     "seg_count": len(pr.get("segments", [])) if pr else 0,
                     "log": STATE["log"][-8:],
                     "manual": dict(STATE.get("manual") or {}),
+                    "video_tools": copy.deepcopy(STATE.get("video_tools") or {}),
                 })
 
         if p == "/api/story/generated_script":
             return self._json(*manual_api.api_story_generated_script())
+
+        if p == "/api/story/image_pack/latest":
+            return self._json(*manual_api.api_story_image_pack_latest())
 
         if p == "/api/config":
             try:
@@ -292,30 +309,61 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if url:
                     with _LOCK:
-                        if STATE["running"] or STATE["busy"]:
-                            return self._json({"error": "Đang bận: " + (STATE["busy"] or "đang chạy pipeline")}, 409)
                         jid = _NEXT_ID[0]
                         _NEXT_ID[0] += 1
-                        job = {"id": jid, "name": "Đang tải link...",
-                               "path": "", "status": "đang tải",
-                               "note": "Đang tải video bằng yt-dlp",
-                               "progress": 5, "source_url": url}
+                        job = {"id": jid, "name": url[:60] + "…",
+                               "path": "", "status": "chờ tải",
+                               "note": "Đang chờ slot tải…",
+                               "progress": 0, "source_url": url}
                         STATE["queue"].append(job)
                         STATE["selected"] = jid
-                        STATE["busy"] = "Đang tải video từ link..."
-                    _progress(pct=5, step="Tải video", detail=url[:120])
 
-                    def _download_job(job_id=jid, src_url=url):
+                    def _download_worker(job_id=jid, src_url=url):
+                        # Cập nhật trạng thái khi bắt đầu chờ semaphore
+                        with _LOCK:
+                            j = _find(job_id)
+                            if j:
+                                j.update({"status": "chờ tải",
+                                          "note": "Đang chờ slot tải…"})
+                        _DOWNLOAD_SEM.acquire()
                         try:
+                            with _LOCK:
+                                j = _find(job_id)
+                                if not j:
+                                    return
+                                j.update({"status": "đang tải",
+                                          "note": "Đang chuẩn bị bộ tải video",
+                                          "progress": 5})
+                                STATE["download_active"] = STATE.get("download_active", 0) + 1
+                            _log(f"Đang tải: {src_url}", "step")
                             from ..downloader import download_video
                             cfg = _load_cfg().get("download", {})
-                            _log(f"Đang tải: {src_url}", "step")
-                            downloaded = download_video(src_url, os.path.join(HERE, "downloads"),
-                                                        quality=cfg.get("quality", "best"),
-                                                        cookies_from_browser=cfg.get("cookies_from_browser"),
-                                                        cookies_file=cfg.get("cookies_file"),
-                                                        concurrent_fragments=cfg.get("concurrent_fragments", 8),
-                                                        external_downloader=cfg.get("external_downloader", "auto"))
+
+                            def _download_progress(info):
+                                pct = info.get("percent")
+                                note = str(info.get("text") or "Đang tải video…")
+                                with _LOCK:
+                                    active_job = _find(job_id)
+                                    if not active_job:
+                                        return
+                                    if pct is not None:
+                                        # DASH tải hình rồi tới tiếng nên % của
+                                        # luồng sau có thể về 0; giữ thanh tổng
+                                        # thể không chạy lùi, chi tiết vẫn ghi
+                                        # đúng luồng/%/tốc độ/ETA hiện tại.
+                                        active_job["progress"] = max(
+                                            float(active_job.get("progress") or 5),
+                                            min(99.0, float(pct)))
+                                    active_job["note"] = note[:220]
+
+                            downloaded = download_video(
+                                src_url, os.path.join(HERE, "downloads"),
+                                quality=cfg.get("quality", "best"),
+                                cookies_from_browser=cfg.get("cookies_from_browser"),
+                                cookies_file=cfg.get("cookies_file"),
+                                concurrent_fragments=cfg.get("concurrent_fragments", 8),
+                                external_downloader=cfg.get("external_downloader", "auto"),
+                                progress_callback=_download_progress)
                             if not downloaded or not os.path.isfile(downloaded):
                                 raise RuntimeError(f"Không thấy file sau khi tải: {downloaded}")
                             with _LOCK:
@@ -329,7 +377,6 @@ class Handler(BaseHTTPRequestHandler):
                                     STATE["selected"] = job_id
                             get_project(job_id)
                             bump_rev(job_id)
-                            _progress(pct=100, step="Tải video", detail=os.path.basename(downloaded))
                             _log(f"Đã tải xong: {os.path.basename(downloaded)}", "ok")
                         except Exception as e:
                             with _LOCK:
@@ -340,11 +387,10 @@ class Handler(BaseHTTPRequestHandler):
                             _log(f"Tải video lỗi: {e}", "err")
                         finally:
                             with _LOCK:
-                                if STATE["busy"].startswith("Đang tải video"):
-                                    STATE["busy"] = ""
-                            _progress(pct=0, step="Sẵn sàng", detail="")
+                                STATE["download_active"] = max(0, STATE.get("download_active", 0) - 1)
+                            _DOWNLOAD_SEM.release()
 
-                    threading.Thread(target=_download_job, daemon=True).start()
+                    threading.Thread(target=_download_worker, daemon=True).start()
                     return self._json({"ok": True, "id": jid, "async": True})
                 if not path or not os.path.isfile(path):
                     return self._json({"error": f"Không thấy file: {path}"}, 400)
@@ -359,6 +405,94 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "id": jid})
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+
+        if p == "/api/queue/add_batch":
+            urls = b.get("urls", [])
+            if isinstance(urls, str):
+                urls = [u.strip() for u in urls.split("\n") if u.strip()]
+            from ..downloader import extract_url
+            results = []
+            for raw in urls:
+                url = extract_url(raw)
+                if not url:
+                    results.append({"url": raw, "error": "URL không hợp lệ"})
+                    continue
+                try:
+                    with _LOCK:
+                        jid = _NEXT_ID[0]
+                        _NEXT_ID[0] += 1
+                        job = {"id": jid, "name": url[:60] + "…",
+                               "path": "", "status": "chờ tải",
+                               "note": "Đang chờ slot tải…",
+                               "progress": 0, "source_url": url}
+                        STATE["queue"].append(job)
+
+                    def _batch_dl(job_id=jid, src_url=url):
+                        with _LOCK:
+                            j = _find(job_id)
+                            if j:
+                                j.update({"status": "chờ tải", "note": "Đang chờ slot tải…"})
+                        _DOWNLOAD_SEM.acquire()
+                        try:
+                            with _LOCK:
+                                j = _find(job_id)
+                                if not j:
+                                    return
+                                j.update({"status": "đang tải",
+                                          "note": "Đang chuẩn bị bộ tải video",
+                                          "progress": 5})
+                                STATE["download_active"] = STATE.get("download_active", 0) + 1
+                            from ..downloader import download_video
+                            cfg = _load_cfg().get("download", {})
+
+                            def _download_progress(info):
+                                pct = info.get("percent")
+                                note = str(info.get("text") or "Đang tải video…")
+                                with _LOCK:
+                                    active_job = _find(job_id)
+                                    if not active_job:
+                                        return
+                                    if pct is not None:
+                                        active_job["progress"] = max(
+                                            float(active_job.get("progress") or 5),
+                                            min(99.0, float(pct)))
+                                    active_job["note"] = note[:220]
+
+                            downloaded = download_video(
+                                src_url, os.path.join(HERE, "downloads"),
+                                quality=cfg.get("quality", "best"),
+                                cookies_from_browser=cfg.get("cookies_from_browser"),
+                                cookies_file=cfg.get("cookies_file"),
+                                concurrent_fragments=cfg.get("concurrent_fragments", 8),
+                                external_downloader=cfg.get("external_downloader", "auto"),
+                                progress_callback=_download_progress)
+                            if not downloaded or not os.path.isfile(downloaded):
+                                raise RuntimeError(f"Không thấy file sau khi tải: {downloaded}")
+                            with _LOCK:
+                                j = _find(job_id)
+                                if j:
+                                    j.update({"name": os.path.basename(downloaded),
+                                              "path": downloaded, "status": "chờ",
+                                              "note": "Tải xong", "progress": 100})
+                            get_project(job_id)
+                            bump_rev(job_id)
+                            _log(f"Đã tải xong: {os.path.basename(downloaded)}", "ok")
+                        except Exception as e:
+                            with _LOCK:
+                                j = _find(job_id)
+                                if j:
+                                    j.update({"status": "lỗi", "note": str(e)[:200], "progress": 100})
+                            _log(f"Tải video lỗi: {e}", "err")
+                        finally:
+                            with _LOCK:
+                                STATE["download_active"] = max(0, STATE.get("download_active", 0) - 1)
+                            _DOWNLOAD_SEM.release()
+
+                    threading.Thread(target=_batch_dl, daemon=True).start()
+                    results.append({"url": url, "id": jid, "ok": True})
+                except Exception as e:
+                    results.append({"url": raw, "error": str(e)})
+            return self._json({"ok": True, "results": results})
 
         if p == "/api/queue/remove":
             with _LOCK:
@@ -439,8 +573,41 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/story/generate_and_run":
             return self._json(*manual_api.api_story_generate_and_run(b))
 
+        if p == "/api/story/resume_images":
+            return self._json(*manual_api.api_story_resume_images(b))
+
+        if p == "/api/story/image_pack":
+            return self._json(*manual_api.api_story_image_pack(b))
+
         if p == "/api/story/voice_recommendations":
             return self._json(*manual_api.api_story_voice_recommendations(b))
+
+        if p == "/api/story/search_sources":
+            return self._json(*manual_api.api_story_search_sources(b))
+
+        if p == "/api/story/reference_catalog":
+            return self._json(*manual_api.api_story_reference_catalog(b))
+
+        if p == "/api/story/search_references":
+            return self._json(*manual_api.api_story_search_references(b))
+
+        if p == "/api/story/cut_sources":
+            return self._json(*manual_api.api_story_cut_sources(b))
+
+        if p == "/api/story/download_sources":
+            return self._json(*manual_api.api_story_download_sources(b))
+
+        if p == "/api/story/video_info":
+            return self._json(*manual_api.api_story_video_info(b))
+
+        if p == "/api/tools/search_videos":
+            return self._json(*video_tools_api.api_search_videos(b))
+
+        if p == "/api/tools/download_videos":
+            return self._json(*video_tools_api.api_download_videos(b))
+
+        if p == "/api/tools/cut_videos":
+            return self._json(*video_tools_api.api_cut_videos(b))
 
         if p == "/api/manual/mux":
             return self._json(*manual_api.api_manual_mux(b))
@@ -510,10 +677,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/cancel":
             with _LOCK:
+                was_running = bool(STATE["running"] or STATE["busy"] or
+                                   (STATE.get("manual") or {}).get("working"))
                 STATE["cancel"] = True
                 _CANCEL_EVENT.set()
+                manual = STATE.get("manual") or {}
+                if manual.get("working"):
+                    manual.update({
+                        "status": "Đang dừng tác vụ…",
+                        "error": "",
+                        "rev": int(manual.get("rev", 0)) + 1,
+                    })
             cancel_running_processes()
-            return self._json({"ok": True})
+            return self._json({"ok": True, "active": was_running})
 
         return self._json({"error": "unknown endpoint"}, 404)
 

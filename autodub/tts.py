@@ -38,6 +38,31 @@ except Exception:  # edge-tts chưa cài hoặc đổi cấu trúc nội bộ ->
     _RETRYABLE_ERRORS = (Exception,)
 
 
+def _channel_cta_speed(value) -> float:
+    try:
+        return max(1.0, min(2.0, float(value or 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _is_channel_cta_text(text: str, configured_text: str = "") -> bool:
+    """Nhận diện riêng câu nhắc kênh để chỉ tăng tốc đúng đoạn này."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip().casefold()
+    if not value:
+        return False
+    if ("bạn đang nghe chuyện tại" in value or
+            "bạn đang nghe truyện tại" in value):
+        return True
+    configured = re.sub(r"\s+", " ", str(configured_text or "")).strip().casefold()
+    if not configured:
+        return False
+    # Bỏ biến tên kênh rồi dùng cụm dài nhất hai bên làm dấu nhận diện. Cách
+    # này vẫn nhận ra một CTA tùy biến khi bộ tách câu chia nó thành vài clip.
+    parts = [p.strip(" .,!?:;-—") for p in configured.split("{channel}")]
+    needles = [p for p in parts if len(p) >= 10]
+    return any(needle in value or value in needle for needle in needles)
+
+
 # Bộ giọng nhân vật (tạo từ 2 giọng gốc + dịch cao độ nhẹ)
 VOICE_PRESETS = [
     {"voice": "vi-VN-NamMinhNeural", "pitch": "+0Hz"},   # 0: nam chuẩn
@@ -55,6 +80,17 @@ _CAPCUT_CLIENT = None
 _CAPCUT_CLIENT_KEY: Optional[str] = None
 _CAPCUT_ERROR: Optional[Exception] = None
 _CAPCUT_STATUS_LOCK = threading.Lock()
+_CAPCUT_LOCK = threading.Lock()
+
+
+def _raise_if_cancelled(cancel_event=None) -> None:
+    """Dừng ở ranh giới an toàn giữa hai lượt TTS.
+
+    File đã tạo xong vẫn được giữ trong cache để lần chạy sau tiếp tục; chỉ
+    phần đang dở mới bị bỏ.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise InterruptedError("Đã dừng tạo giọng theo yêu cầu.")
 
 
 # --------------------------------------------------------------------------- #
@@ -62,6 +98,7 @@ _CAPCUT_STATUS_LOCK = threading.Lock()
 # --------------------------------------------------------------------------- #
 _VIENEU_MODEL = None
 _VIENEU_ERROR: Optional[Exception] = None
+_VIENEU_LOCK = threading.Lock()
 _VIENEU_KWARGS: dict = {}
 
 # Các kho model VieNeu-TTS tải về (đều CÔNG KHAI, KHÔNG cần token HuggingFace).
@@ -143,12 +180,18 @@ def _load_vieneu_model(**kwargs):
     if _VIENEU_ERROR is not None:
         raise _VIENEU_ERROR          # đã hỏng rồi - hỏng ngay, đừng thử lại
 
-    try:
-        from vieneu import Vieneu
-    except ImportError:
-        _VIENEU_ERROR = RuntimeError(
-            "Chưa cài VieNeu-TTS. Chạy trong venv: python -m pip install vieneu")
-        raise _VIENEU_ERROR
+    with _VIENEU_LOCK:
+        if _VIENEU_MODEL is not None:
+            return _VIENEU_MODEL
+        if _VIENEU_ERROR is not None:
+            raise _VIENEU_ERROR
+
+        try:
+            from vieneu import Vieneu
+        except ImportError:
+            _VIENEU_ERROR = RuntimeError(
+                "Chưa cài VieNeu-TTS. Chạy trong venv: python -m pip install vieneu")
+            raise _VIENEU_ERROR
 
     # Phải gỡ bản vá TRƯỚC khi khởi tạo, nếu không mọi lượt tải đều lạc sang
     # modelscope.cn (xem giải thích ở unpatch_modelscope_hub).
@@ -292,29 +335,33 @@ def _load_capcut_client(device_json: Optional[str] = None):
     if _CAPCUT_CLIENT is not None and _CAPCUT_CLIENT_KEY == key:
         return _CAPCUT_CLIENT
 
-    sdk = _capcut_sdk_path()
-    if os.path.isdir(sdk) and sdk not in sys.path:
-        sys.path.insert(0, sdk)
+    with _CAPCUT_LOCK:
+        if _CAPCUT_CLIENT is not None and _CAPCUT_CLIENT_KEY == key:
+            return _CAPCUT_CLIENT
 
-    try:
-        from capcut_tts_api import CapCutClient
-    except Exception as e:
-        _CAPCUT_ERROR = RuntimeError(
-            "Chua cai capcut-tts-api. Chay: git clone "
-            "https://github.com/K07VN/capcut-tts-api tools/capcut-tts-api")
-        raise _CAPCUT_ERROR from e
+        sdk = _capcut_sdk_path()
+        if os.path.isdir(sdk) and sdk not in sys.path:
+            sys.path.insert(0, sdk)
 
-    try:
-        if device_json and os.path.exists(device_json):
-            _CAPCUT_CLIENT = CapCutClient(device=device_json)
-        else:
-            _CAPCUT_CLIENT = CapCutClient()
-        _CAPCUT_CLIENT_KEY = key
-        _CAPCUT_ERROR = None
-        return _CAPCUT_CLIENT
-    except Exception as e:
-        _CAPCUT_ERROR = e
-        raise
+        try:
+            from capcut_tts_api import CapCutClient
+        except Exception as e:
+            _CAPCUT_ERROR = RuntimeError(
+                "Chua cai capcut-tts-api. Chay: git clone "
+                "https://github.com/K07VN/capcut-tts-api tools/capcut-tts-api")
+            raise _CAPCUT_ERROR from e
+
+        try:
+            if device_json and os.path.exists(device_json):
+                _CAPCUT_CLIENT = CapCutClient(device=device_json)
+            else:
+                _CAPCUT_CLIENT = CapCutClient()
+            _CAPCUT_CLIENT_KEY = key
+            _CAPCUT_ERROR = None
+            return _CAPCUT_CLIENT
+        except Exception as e:
+            _CAPCUT_ERROR = e
+            raise
 
 
 def _capcut_rate(base_rate: str) -> str:
@@ -379,20 +426,24 @@ def _synth_one_capcut(text: str, voice: Optional[str], rate: str, out_path: str,
                       device_json: Optional[str] = None, max_retries: int = 2,
                       poll_interval: float = 1.0, timeout: float = 90.0,
                       label: str = "1 dong", api_url: Optional[str] = None,
-                      speed: int = 10, reuse_existing: bool = True) -> bool:
+                      speed: int = 10, reuse_existing: bool = True,
+                      cancel_event=None) -> bool:
     last_err: Optional[Exception] = None
     done = {"succeed", "success", "completed", "complete"}
     bad = {"failed", "fail", "error", "canceled", "cancelled"}
     voice = voice or CAPCUT_DEFAULT_VOICE
+    _raise_if_cancelled(cancel_event)
     if reuse_existing and os.path.exists(out_path) and os.path.getsize(out_path) >= 512:
         _record_capcut_voice_status(voice, True)
         return True
 
     for attempt in range(1, max_retries + 1):
         try:
+            _raise_if_cancelled(cancel_event)
             if api_url:
                 ok = _capcut_synth_via_http_api(text, voice, out_path, api_url,
                                                 speed=speed, timeout=timeout)
+                _raise_if_cancelled(cancel_event)
                 if ok:
                     _record_capcut_voice_status(voice, True)
                 return ok
@@ -407,6 +458,7 @@ def _synth_one_capcut(text: str, voice: Optional[str], rate: str, out_path: str,
 
             start = time.time()
             while time.time() - start < timeout:
+                _raise_if_cancelled(cancel_event)
                 query = client.query_tts_task(task_id, token,
                                               bind_id=task.get("bind_id", ""))
                 qtasks = (query.get("data") or {}).get("tasks") or []
@@ -426,13 +478,23 @@ def _synth_one_capcut(text: str, voice: Optional[str], rate: str, out_path: str,
                     return True
                 if status in bad:
                     raise RuntimeError(f"CapCut task loi: {str(query)[:300]}")
-                time.sleep(poll_interval)
+                # Chia nhỏ thời gian chờ để nút Dừng phản hồi nhanh.
+                wait_until = time.time() + poll_interval
+                while time.time() < wait_until:
+                    _raise_if_cancelled(cancel_event)
+                    time.sleep(min(0.1, max(0.0, wait_until - time.time())))
             raise RuntimeError(f"CapCut timeout sau {timeout:.0f}s")
+        except InterruptedError:
+            _clean_partial(out_path)
+            raise
         except Exception as e:
             last_err = e
             _clean_partial(out_path)
             if attempt < max_retries:
-                time.sleep(1.0 + random.uniform(0, 0.5))
+                wait_until = time.time() + 1.0 + random.uniform(0, 0.5)
+                while time.time() < wait_until:
+                    _raise_if_cancelled(cancel_event)
+                    time.sleep(min(0.1, max(0.0, wait_until - time.time())))
 
     preview = text if len(text) <= 50 else text[:50] + "..."
     _record_capcut_voice_status(voice, False, str(last_err or "không rõ lỗi"))
@@ -442,7 +504,8 @@ def _synth_one_capcut(text: str, voice: Optional[str], rate: str, out_path: str,
 
 def _synth_all_capcut(segments: List[Segment], workdir: str, base_rate: str,
                       concurrency: int, max_retries: int = 2,
-                      capcut_options: Optional[dict] = None) -> List[Optional[str]]:
+                      capcut_options: Optional[dict] = None,
+                      cancel_event=None) -> List[Optional[str]]:
     opts = dict(capcut_options or {})
     rate = str(opts.get("rate") or _capcut_rate(base_rate))
     api_url = opts.get("kuwacom_api_url") or opts.get("api_url")
@@ -458,8 +521,10 @@ def _synth_all_capcut(segments: List[Segment], workdir: str, base_rate: str,
     todo = [(i, s) for i, s in enumerate(segments) if is_speakable(s.text)]
     log(f"Tong hop {len(todo)} dong bang CapCut TTS ({cap_conc} luong, rate={rate})...", "step")
 
-    def one(i: int, s: Segment) -> tuple[int, Optional[str]]:
-        voice = s.voice or CAPCUT_DEFAULT_VOICE
+    def one(i: int, s: Segment, override_voice: Optional[str] = None,
+            label_suffix: str = "") -> tuple[int, Optional[str]]:
+        _raise_if_cancelled(cancel_event)
+        voice = override_voice or s.voice or CAPCUT_DEFAULT_VOICE
         cache_src = "\n".join([s.text or "", voice, str(rate), str(speed),
                                str(api_url or ""), str(device_json or "")])
         cache_key = hashlib.md5(cache_src.encode("utf-8")).hexdigest()[:12]
@@ -468,8 +533,8 @@ def _synth_all_capcut(segments: List[Segment], workdir: str, base_rate: str,
             s.text, voice, rate, out,
             device_json=device_json, max_retries=max_retries,
             poll_interval=poll_interval, timeout=timeout,
-            label=f"dong {s.index}", api_url=api_url, speed=speed,
-            reuse_existing=reuse_existing)
+            label=f"dong {s.index}{label_suffix}", api_url=api_url, speed=speed,
+            reuse_existing=reuse_existing, cancel_event=cancel_event)
         return i, out if ok else None
 
     done_count = 0
@@ -481,6 +546,48 @@ def _synth_all_capcut(segments: List[Segment], workdir: str, base_rate: str,
             done_count += 1
             if done_count % 20 == 0 or done_count == len(todo):
                 log(f"  ...da xong {done_count}/{len(todo)} dong", "info")
+
+    # Catalog CapCut ngoài thực tế có thể chứa voice id đã cũ hoặc voice Edge
+    # không được endpoint hiện tại chấp nhận. Không để một vai phụ làm hỏng cả
+    # truyện: chỉ những dòng lỗi được đọc lại bằng giọng kể an toàn.
+    _raise_if_cancelled(cancel_event)
+    failed = [(i, s) for i, s in todo if not paths[i]]
+    if failed:
+        fallback_voice = str(opts.get("fallback_voice") or CAPCUT_DEFAULT_VOICE)
+        fallback_retries = max(3, int(opts.get("fallback_max_retries", max_retries) or max_retries))
+        fallback_concurrency = max(1, min(
+            len(failed), cap_conc,
+            int(opts.get("fallback_concurrency", 2) or 2)))
+        log("CapCut loi %d dong; thu lai bang giong ke du phong %s (%d luong)..."
+            % (len(failed), fallback_voice, fallback_concurrency), "warn")
+
+        def fallback_one(i: int, s: Segment) -> tuple[int, Optional[str]]:
+            _raise_if_cancelled(cancel_event)
+            voice = fallback_voice
+            if voice == (s.voice or CAPCUT_DEFAULT_VOICE):
+                voice = CAPCUT_DEFAULT_VOICE
+            cache_src = "\n".join([s.text or "", voice, str(rate), str(speed),
+                                   str(api_url or ""), str(device_json or "")])
+            cache_key = hashlib.md5(cache_src.encode("utf-8")).hexdigest()[:12]
+            out = os.path.join(workdir, f"capcut_{i:05d}_{cache_key}.mp3")
+            ok = _synth_one_capcut(
+                s.text, voice, rate, out,
+                device_json=device_json, max_retries=fallback_retries,
+                poll_interval=poll_interval, timeout=timeout,
+                label=f"dong {s.index} (giong du phong)", api_url=api_url,
+                speed=speed, reuse_existing=reuse_existing,
+                cancel_event=cancel_event)
+            return i, out if ok else None
+
+        with ThreadPoolExecutor(max_workers=fallback_concurrency) as ex:
+            futs = [ex.submit(fallback_one, i, s) for i, s in failed]
+            for fut in as_completed(futs):
+                i, path = fut.result()
+                paths[i] = path
+        recovered = sum(1 for i, _s in failed if paths[i])
+        level = "ok" if recovered == len(failed) else "warn"
+        log("Giong ke du phong da cuu %d/%d dong CapCut bi loi."
+            % (recovered, len(failed)), level)
     return paths
 
 
@@ -506,6 +613,12 @@ def list_voices(engine: str = "edge") -> List[dict]:
                     lang = str(row.get("lang") or row.get("lan") or "").lower()
                     voice_id = str(row.get("voice_type") or "").strip()
                     if lang not in {"vi", "vi-vn"} or not voice_id or voice_id in seen:
+                        continue
+                    # Đây là id của Microsoft Edge TTS, không phải speaker hợp lệ
+                    # của endpoint CapCut. Voice.json của vài bản SDK trộn cả hai
+                    # loại; đưa chúng vào dàn nhân vật sẽ trả err_code 40402004.
+                    folded_id = voice_id.casefold()
+                    if folded_id.startswith("vi-") and folded_id.endswith("neural"):
                         continue
                     seen.add(voice_id)
                     label = str(row.get("display_name") or voice_id).strip()
@@ -695,7 +808,7 @@ def _clean_partial(path: str) -> None:
 
 async def _synth_one(text: str, voice: str, pitch: str, rate: str, out_path: str,
                      max_retries: int = 4, base_delay: float = 1.2,
-                     label: str = "1 dòng") -> bool:
+                     label: str = "1 dòng", cancel_event=None) -> bool:
     """Tổng hợp 1 dòng, tự thử lại khi gặp lỗi mạng/rate-limit tạm thời từ edge-tts.
 
     Lỗi "No audio was received" hầu hết là do server tạm thời không trả dữ liệu
@@ -707,17 +820,25 @@ async def _synth_one(text: str, voice: str, pitch: str, rate: str, out_path: str
     last_err: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
+            _raise_if_cancelled(cancel_event)
             comm = edge_tts.Communicate(text, voice=voice, rate=rate, pitch=pitch)
             await comm.save(out_path)
+            _raise_if_cancelled(cancel_event)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 return True
             raise RuntimeError("File âm thanh rỗng.")
+        except InterruptedError:
+            _clean_partial(out_path)
+            raise
         except _RETRYABLE_ERRORS as e:
             last_err = e
             _clean_partial(out_path)
             if attempt < max_retries:
                 delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 0.6)
-                await asyncio.sleep(delay)
+                end = time.monotonic() + delay
+                while time.monotonic() < end:
+                    _raise_if_cancelled(cancel_event)
+                    await asyncio.sleep(min(0.1, max(0.0, end - time.monotonic())))
         except Exception as e:  # lỗi không thuộc nhóm biết trước -> vẫn ghi nhận, không retry vô ích
             last_err = e
             _clean_partial(out_path)
@@ -730,23 +851,27 @@ async def _synth_one(text: str, voice: str, pitch: str, rate: str, out_path: str
 
 async def _synth_all(segments: List[Segment], workdir: str, base_rate: str,
                      concurrency: int, max_retries: int = 4,
-                     retry_base_delay: float = 1.2) -> List[Optional[str]]:
+                     retry_base_delay: float = 1.2,
+                     cancel_event=None) -> List[Optional[str]]:
     sem = asyncio.Semaphore(concurrency)
     paths: List[Optional[str]] = [None] * len(segments)
 
     async def attempt(i: int, seg: Segment, conc_sem: asyncio.Semaphore, retries: int) -> bool:
+        _raise_if_cancelled(cancel_event)
         voice, pitch = _edge_voice_and_pitch(seg.voice)
         out = os.path.join(workdir, f"line_{i:05d}.mp3")
         async with conc_sem:
             ok = await _synth_one(seg.text, voice, pitch, base_rate, out,
                                   max_retries=retries, base_delay=retry_base_delay,
-                                  label=f"dòng {seg.index}")
+                                  label=f"dòng {seg.index}",
+                                  cancel_event=cancel_event)
         if ok:
             paths[i] = out
         return ok
 
     todo = [(i, s) for i, s in enumerate(segments) if is_speakable(s.text)]
     await asyncio.gather(*(attempt(i, s, sem, max_retries) for i, s in todo))
+    _raise_if_cancelled(cancel_event)
 
     # Vòng 2: các dòng vẫn lỗi sau vòng 1 -> thử lại RIÊNG LẺ (concurrency thấp) để
     # né rate-limit do quá nhiều kết nối song song, thường vớt lại được gần hết.
@@ -767,7 +892,8 @@ async def _synth_all(segments: List[Segment], workdir: str, base_rate: str,
             async with low_sem:
                 if await _synth_one(s.text, alt, "+0Hz", base_rate, out,
                                     max_retries=2, base_delay=retry_base_delay,
-                                    label=f"dòng {s.index} (đổi giọng {alt})"):
+                                    label=f"dòng {s.index} (đổi giọng {alt})",
+                                    cancel_event=cancel_event):
                     paths[i] = out
                     log(f"Dòng {s.index}: đọc được bằng giọng dự phòng {alt}.", "ok")
 
@@ -775,7 +901,8 @@ async def _synth_all(segments: List[Segment], workdir: str, base_rate: str,
 
 
 def _synth_one_vieneu(text: str, voice: Optional[str], out_path: str,
-                      max_retries: int = 2, label: str = "1 dòng") -> bool:
+                      max_retries: int = 2, label: str = "1 dòng",
+                      cancel_event=None) -> bool:
     """Tổng hợp 1 dòng bằng VieNeu-TTS (model local, KHÔNG qua mạng nên hiếm
     khi lỗi tạm thời - vẫn thử lại vài lần phòng OOM/glitch)."""
     # Tên giọng từ GUI/config có thể là dạng đầy đủ ('Minh Đức — Nam · Bắc · ...')
@@ -785,12 +912,17 @@ def _synth_one_vieneu(text: str, voice: Optional[str], out_path: str,
     last_err: Optional[Exception] = None
     for attempt in range(1, max_retries + 1):
         try:
+            _raise_if_cancelled(cancel_event)
             model = _load_vieneu_model()
             audio = model.infer(text, voice=(voice or None))
+            _raise_if_cancelled(cancel_event)
             model.save(audio, out_path)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 return True
             raise RuntimeError("File âm thanh rỗng.")
+        except InterruptedError:
+            _clean_partial(out_path)
+            raise
         except Exception as e:
             last_err = e
             _clean_partial(out_path)
@@ -801,16 +933,17 @@ def _synth_one_vieneu(text: str, voice: Optional[str], out_path: str,
 
 
 def _synth_all_vieneu(segments: List[Segment], workdir: str,
-                      max_retries: int = 2) -> List[Optional[str]]:
+                      max_retries: int = 2, cancel_event=None) -> List[Optional[str]]:
     """Tổng hợp TUẦN TỰ (không song song) vì model chạy trên 1 GPU/CPU cục bộ -
     chạy song song nhiều luồng dễ tranh chấp VRAM/không an toàn luồng."""
     paths: List[Optional[str]] = [None] * len(segments)
     todo = [(i, s) for i, s in enumerate(segments) if is_speakable(s.text)]
     log(f"Tổng hợp {len(todo)} dòng bằng VieNeu-TTS (model local, tuần tự)...", "step")
     for n, (i, s) in enumerate(todo, 1):
+        _raise_if_cancelled(cancel_event)
         out = os.path.join(workdir, f"line_{i:05d}.wav")
         ok = _synth_one_vieneu(s.text, s.voice, out, max_retries=max_retries,
-                               label=f"dòng {s.index}")
+                               label=f"dòng {s.index}", cancel_event=cancel_event)
         if ok:
             paths[i] = out
         if n % 20 == 0 or n == len(todo):
@@ -831,14 +964,21 @@ def synthesize_text_audio(
     vieneu_options: Optional[dict] = None,
     capcut_options: Optional[dict] = None,
     max_chunk_chars: int = 700,
+    utterances: Optional[List[dict]] = None,
+    channel_cta_speed: float = 1.0,
+    channel_cta_text: str = "",
+    cancel_event=None,
 ) -> dict:
     """Tạo một file audio độc lập từ văn bản dài.
 
     Văn bản được tách tự nhiên thành các đoạn vừa với dịch vụ TTS rồi nối lại
-    theo thứ tự. Luồng này không dùng thuật toán ép timing của phụ đề, vì vậy
-    tốc độ đọc được giữ đúng theo ``base_rate`` và không bị tăng tốc để lấp slot.
+    theo thứ tự. Nếu ``utterances`` được truyền vào, mỗi lượt đã có ``voice`` và
+    ``speaker`` riêng (lời kể/nhân vật); khi tách nhỏ vẫn giữ nguyên giọng đó.
+    Luồng này không dùng thuật toán ép timing của phụ đề, vì vậy tốc độ đọc được
+    giữ đúng theo ``base_rate`` và không bị tăng tốc để lấp slot.
     """
     global _VIENEU_KWARGS
+    _raise_if_cancelled(cancel_event)
     clean = re.sub(r"[ \t]+", " ", str(text or ""))
     clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
     if not clean:
@@ -847,47 +987,104 @@ def synthesize_text_audio(
         raise ValueError("Văn bản quá dài (tối đa 200.000 ký tự mỗi lần).")
 
     max_chunk_chars = max(120, min(1500, int(max_chunk_chars or 700)))
-    chunks = split_vi_text_naturally(
-        clean, max_chars=max_chunk_chars,
-        min_chars=min(80, max(24, max_chunk_chars // 8)))
-    if not chunks:
-        raise ValueError("Không tìm thấy nội dung có thể đọc.")
-
     os.makedirs(workdir, exist_ok=True)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    segments = [Segment(i, float(i - 1), float(i), chunk)
-                for i, chunk in enumerate(chunks, 1)]
     engine = (engine or "edge").strip().lower()
     if engine not in {"edge", "vieneu", "capcut"}:
         raise ValueError(f"Engine TTS không hỗ trợ: {engine}")
 
     narrator = narrator or DEFAULT_NARRATOR
-    assign_voices(
-        segments, "narrator", narrator, engine=engine,
-        vieneu_voice=narrator.get("voice") if engine == "vieneu" else None)
+    segment_meta: List[dict] = []
+    chunks: List[str] = []
+    if utterances:
+        for utterance in utterances:
+            value = re.sub(r"\s+", " ", str(utterance.get("text") or "")).strip()
+            if not value:
+                continue
+            pieces = split_vi_text_naturally(
+                value, max_chars=max_chunk_chars,
+                min_chars=min(80, max(24, max_chunk_chars // 8))) or [value]
+            for piece in pieces:
+                chunks.append(piece)
+                segment_meta.append({
+                    "speaker": str(utterance.get("speaker") or "narrator"),
+                    "speaker_name": str(utterance.get("speaker_name") or "Người kể"),
+                    "kind": str(utterance.get("kind") or "narration"),
+                    "confidence": utterance.get("confidence"),
+                    "voice": str(utterance.get("voice") or narrator.get("voice") or ""),
+                    "channel_cta": _is_channel_cta_text(piece, channel_cta_text),
+                })
+    else:
+        chunks = split_vi_text_naturally(
+            clean, max_chars=max_chunk_chars,
+            min_chars=min(80, max(24, max_chunk_chars // 8)))
+        segment_meta = [{"speaker": "narrator", "speaker_name": "Người kể",
+                         "kind": "narration", "confidence": 1.0,
+                         "voice": str(narrator.get("voice") or ""),
+                         "channel_cta": _is_channel_cta_text(
+                             chunk, channel_cta_text)}
+                        for chunk in chunks]
+    if not chunks:
+        raise ValueError("Không tìm thấy nội dung có thể đọc.")
+
+    segments = [Segment(i, float(i - 1), float(i), chunk)
+                for i, chunk in enumerate(chunks, 1)]
+    if utterances:
+        for seg, meta in zip(segments, segment_meta):
+            voice = meta["voice"]
+            if engine == "edge":
+                edge_voice, edge_pitch = _edge_voice_and_pitch(voice)
+                seg.voice = f"{edge_voice}|{edge_pitch}"
+            elif engine == "capcut":
+                seg.voice = voice or CAPCUT_DEFAULT_VOICE
+            else:
+                seg.voice = voice
+            meta["voice"] = seg.voice
+    else:
+        assign_voices(
+            segments, "narrator", narrator, engine=engine,
+            vieneu_voice=narrator.get("voice") if engine == "vieneu" else None)
+        for seg, meta in zip(segments, segment_meta):
+            meta["voice"] = seg.voice
 
     if engine == "capcut":
+        capcut_opts = dict(capcut_options or {})
+        capcut_opts.setdefault(
+            "fallback_voice", narrator.get("voice") or CAPCUT_DEFAULT_VOICE)
         raw_clips = _synth_all_capcut(
             segments, workdir, base_rate, concurrency,
-            max_retries=max_retries, capcut_options=capcut_options)
+            max_retries=max_retries, capcut_options=capcut_opts,
+            cancel_event=cancel_event)
     elif engine == "vieneu":
         _VIENEU_KWARGS = dict(vieneu_options or {})
         raw_clips = _synth_all_vieneu(
-            segments, workdir, max_retries=max_retries)
+            segments, workdir, max_retries=max_retries,
+            cancel_event=cancel_event)
     else:
         raw_clips = asyncio.run(_synth_all(
             segments, workdir, base_rate, concurrency,
-            max_retries=max_retries, retry_base_delay=retry_base_delay))
+            max_retries=max_retries, retry_base_delay=retry_base_delay,
+            cancel_event=cancel_event))
 
+    _raise_if_cancelled(cancel_event)
     failed = [s.index for s, path in zip(segments, raw_clips)
               if is_speakable(s.text) and not path]
     prepared_clips: List[str] = []
     clip_durations: List[float] = []
     clip_texts: List[str] = []
+    clip_meta: List[dict] = []
     compacted_count = 0
+    cta_fast_count = 0
+    cta_speed = _channel_cta_speed(channel_cta_speed)
     for i, (seg, path) in enumerate(zip(segments, raw_clips)):
+        _raise_if_cancelled(cancel_event)
         if not path or not os.path.exists(path):
             continue
+        if cta_speed > 1.001 and segment_meta[i].get("channel_cta"):
+            ext = os.path.splitext(path)[1] or ".mp3"
+            faster = os.path.join(workdir, f"manual_cta_fast_{i:05d}{ext}")
+            path = change_speed(path, faster, cta_speed)
+            cta_fast_count += 1
         duration = ffprobe_duration(path)
         expected = max(1.0, len(seg.text or "") / 9.0)
         # Chỉ can thiệp khi clip rõ ràng chậm bất thường, tránh làm mất nhịp kể
@@ -905,6 +1102,7 @@ def synthesize_text_audio(
         prepared_clips.append(path)
         clip_durations.append(max(0.05, duration))
         clip_texts.append(seg.text or "")
+        clip_meta.append(segment_meta[i])
     clips = prepared_clips
     if failed or not clips:
         sample = ", ".join(str(i) for i in failed[:10]) or "tất cả"
@@ -912,34 +1110,44 @@ def synthesize_text_audio(
 
     if compacted_count:
         log(f"Đã rút khoảng lặng bất thường trong {compacted_count} đoạn TTS.", "info")
+    if cta_fast_count:
+        log(f"Đã tăng tốc {cta_fast_count} đoạn nhắc kênh lên {cta_speed:.2g}x.", "info")
 
-    concat_audio_clips(clips, out_path, sr=48000)
+    # Các voice/engine TTS trả mức âm lượng rất khác nhau. Cân từng câu trước
+    # khi nối để lúc đổi nhân vật không bị câu quá to, câu quá nhỏ.
+    _raise_if_cancelled(cancel_event)
+    concat_audio_clips(
+        clips, out_path, sr=48000, normalize_loudness=True)
+    log(f"Đã cân âm lượng {len(clips)} đoạn giọng về -18 LUFS.", "info")
     duration = ffprobe_duration(out_path)
     if duration <= 0 or not os.path.exists(out_path):
         raise RuntimeError("File âm thanh tạo ra bị rỗng hoặc không đọc được.")
 
     # Timeline từng đoạn theo thứ tự nối - để lớp trên sinh PHỤ ĐỀ khớp giọng
     # đọc. Concat nối sát các clip nên mốc = cộng dồn độ dài từng clip.
-    timeline = build_narration_timeline(clip_texts, clip_durations)
+    timeline = build_narration_timeline(clip_texts, clip_durations, clip_meta)
     log(f"Đã tạo audio từ văn bản: {len(chunks)} đoạn, {duration:.1f} giây.", "ok")
     return {"path": out_path, "duration": duration, "chunks": len(chunks),
             "segments": timeline}
 
 
-def build_narration_timeline(texts: List[str],
-                             durations: List[float]) -> List[dict]:
+def build_narration_timeline(texts: List[str], durations: List[float],
+                             metadata: Optional[List[dict]] = None) -> List[dict]:
     """Cộng dồn độ dài các đoạn TTS đã nối thành mốc thời gian tuyệt đối.
 
     Thuần logic để test được: trả [{"start","end","text"}] theo giây.
     """
     out: List[dict] = []
     cursor = 0.0
-    for text, dur in zip(texts, durations):
+    for i, (text, dur) in enumerate(zip(texts, durations)):
         end = cursor + max(0.05, float(dur or 0.0))
         cleaned = (text or "").strip()
         if cleaned:
-            out.append({"start": round(cursor, 3), "end": round(end, 3),
-                        "text": cleaned})
+            item = {"start": round(cursor, 3), "end": round(end, 3),
+                    "text": cleaned}
+            if metadata and i < len(metadata):
+                item.update({k: v for k, v in metadata[i].items() if v is not None})
+            out.append(item)
         cursor = end
     return out
 
@@ -997,10 +1205,13 @@ def build_voice_track(
                                       max_retries=max(2, max_retries // 2))
     elif engine == "capcut":
         engine_label = "CapCut TTS"
+        capcut_opts = dict(capcut_options or {})
+        capcut_opts.setdefault(
+            "fallback_voice", narrator.get("voice") or CAPCUT_DEFAULT_VOICE)
         raw_clips = _synth_all_capcut(
             segments, workdir, base_rate, concurrency,
             max_retries=max(2, max_retries // 2),
-            capcut_options=capcut_options)
+            capcut_options=capcut_opts)
     else:
         engine_label = "edge-tts"
         log(f"Tổng hợp giọng cho {len(segments)} dòng (edge-tts, {concurrency} luồng)...", "step")

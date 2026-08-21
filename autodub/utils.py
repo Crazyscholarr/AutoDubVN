@@ -6,6 +6,7 @@ import math
 import os
 import glob
 import logging
+import queue
 import re
 import shutil
 import subprocess
@@ -13,7 +14,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 
 def _configure_stdio() -> None:
@@ -122,7 +123,11 @@ def log(msg: str, kind: str = "info") -> None:
         "dim": ("[TIME]", f"{C.DIM}[t]{C.E}"),
     }
     plain_tag, color_tag = tags.get(kind, ("[i]", "[i]"))
-    _safe_print(f"{color_tag} {msg}")
+    # Console trước đây không có thời điểm nên khi một bước dài (đặc biệt tải
+    # video) người dùng không biết tiến trình còn chạy hay đã treo. File log đã
+    # có timestamp đầy đủ; console dùng HH:MM:SS để ngắn và dễ theo dõi.
+    console_ts = time.strftime("%H:%M:%S")
+    _safe_print(f"[{console_ts}] {color_tag} {msg}")
 
     path = _LOG_FILE
     if path:
@@ -178,7 +183,11 @@ def cancel_running_processes() -> None:
 
 
 def run(cmd: List[str], check: bool = True, quiet: bool = True,
-        timeout: Optional[float] = 3600) -> subprocess.CompletedProcess:
+        timeout: Optional[float] = 3600,
+        line_callback: Optional[Callable[[str], None]] = None,
+        heartbeat_callback: Optional[Callable[[float], None]] = None,
+        heartbeat_interval: float = 15.0,
+        ) -> subprocess.CompletedProcess:
     """Chạy lệnh ngoài (ffmpeg/ffprobe...) một cách AN TOÀN cho app cửa sổ.
 
     Ba điều quan trọng, thiếu cái nào cũng có thể làm treo cả chương trình:
@@ -187,11 +196,15 @@ def run(cmd: List[str], check: bool = True, quiet: bool = True,
       - CREATE_NO_WINDOW : không nháy console đen mỗi lần gọi.
       - timeout : lệnh treo thì bỏ sau ngần này giây thay vì kẹt vĩnh viễn.
     """
+    streaming = line_callback is not None
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE if quiet else None,
-        stderr=subprocess.PIPE if quiet else None,
+        stdout=subprocess.PIPE if (quiet or streaming) else None,
+        # Khi stream, gộp stderr vào stdout để giữ đúng thứ tự log yt-dlp và
+        # tránh deadlock do hai pipe đầy độc lập trên Windows.
+        stderr=subprocess.STDOUT if streaming else (
+            subprocess.PIPE if quiet else None),
         text=True,
         encoding='utf-8',
         errors='replace',
@@ -200,29 +213,100 @@ def run(cmd: List[str], check: bool = True, quiet: bool = True,
     with _RUN_LOCK:
         _RUNNING_PROCS.add(proc)
     started = time.monotonic()
+    last_activity = started
     try:
-        while True:
-            if _CANCEL_EVENT is not None and _CANCEL_EVENT.is_set():
+        if streaming:
+            line_queue: queue.Queue = queue.Queue()
+            stream_done = object()
+
+            def _read_stream() -> None:
                 try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except Exception:
+                    if proc.stdout is not None:
+                        for line in proc.stdout:
+                            line_queue.put(line)
+                finally:
+                    line_queue.put(stream_done)
+
+            reader = threading.Thread(target=_read_stream, daemon=True)
+            reader.start()
+            chunks = []
+            reader_finished = False
+            while not reader_finished:
+                if _CANCEL_EVENT is not None and _CANCEL_EVENT.is_set():
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    raise InterruptedError("Da huy lenh dang chay")
+                if timeout is not None and time.monotonic() - started > timeout:
                     try:
                         proc.kill()
                     except Exception:
                         pass
-                raise InterruptedError("Da huy lenh dang chay")
-            if timeout is not None and time.monotonic() - started > timeout:
+                    raise RuntimeError(
+                        f"Lenh chay qua {timeout:.0f}s nen bi dung: "
+                        f"{' '.join(cmd[:4])}...")
                 try:
-                    proc.kill()
+                    item = line_queue.get(timeout=0.25)
+                except queue.Empty:
+                    now = time.monotonic()
+                    if (heartbeat_callback and
+                            now - last_activity >= max(1.0, float(heartbeat_interval))):
+                        try:
+                            heartbeat_callback(now - started)
+                        except Exception:
+                            pass
+                        last_activity = now
+                    continue
+                if item is stream_done:
+                    reader_finished = True
+                    continue
+                chunks.append(item)
+                last_activity = time.monotonic()
+                try:
+                    line_callback(str(item).rstrip("\r\n"))
                 except Exception:
+                    # Callback chỉ phục vụ hiển thị. Không để lỗi giao diện
+                    # làm hỏng chính tiến trình tải/render.
                     pass
-                raise RuntimeError(f"Lenh chay qua {timeout:.0f}s nen bi dung: {' '.join(cmd[:4])}...")
-            try:
-                stdout, stderr = proc.communicate(timeout=0.25)
-                break
-            except subprocess.TimeoutExpired:
-                continue
+            proc.wait()
+            stdout, stderr = "".join(chunks), ""
+        else:
+            while True:
+                if _CANCEL_EVENT is not None and _CANCEL_EVENT.is_set():
+                    try:
+                        proc.terminate()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    raise InterruptedError("Da huy lenh dang chay")
+                if timeout is not None and time.monotonic() - started > timeout:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Lenh chay qua {timeout:.0f}s nen bi dung: {' '.join(cmd[:4])}...")
+                try:
+                    stdout, stderr = proc.communicate(timeout=0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    now = time.monotonic()
+                    if (heartbeat_callback and
+                            now - last_activity >= max(
+                                1.0, float(heartbeat_interval))):
+                        try:
+                            heartbeat_callback(now - started)
+                        except Exception:
+                            pass
+                        last_activity = now
+                    continue
         res = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
     finally:
         with _RUN_LOCK:
@@ -230,7 +314,7 @@ def run(cmd: List[str], check: bool = True, quiet: bool = True,
     if _CANCEL_EVENT is not None and _CANCEL_EVENT.is_set():
         raise InterruptedError("Da huy lenh dang chay")
     if check and res.returncode != 0:
-        err = (res.stderr or "")[-2000:]
+        err = (res.stderr or res.stdout or "")[-4000:]
         raise RuntimeError(f"Lệnh lỗi ({res.returncode}): {' '.join(cmd[:4])}...\n{err}")
     return res
 

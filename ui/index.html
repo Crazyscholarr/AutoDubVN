@@ -10,11 +10,7 @@
 
 <div id="titlebar">
   <div class="drag pywebview-drag-region">
-    <div class="brand"><div class="dot"></div><b>AutoDubVN</b><span id="ver">v2.5</span>
-      <span id="cuda">· đang kiểm tra</span></div>
-    <div class="creator-banner" title="AutoDubVN by Crazyscholar">
-      <i></i><span>By</span><strong>Crazyscholar</strong>
-    </div>
+    <span class="window-caption">AutoDubVN</span>
   </div>
   <div class="wbtns" id="wbtns">
     <button class="wbtn" title="Thu nhỏ" onclick="winCmd('min')">─</button>
@@ -24,15 +20,13 @@
 </div>
 
 <div id="top">
+  <div class="brand"><div class="brandmark" aria-hidden="true">ϟ</div><b>AutoDubVN</b>
+    <span id="ver">v2.5 AI Studio</span>
+    <span id="cuda"><i></i> đang kiểm tra</span></div>
   <div id="modesw">
-    <button id="mDub" class="on" onclick="setMode('dub')">🎬 Lồng tiếng video</button>
-    <button id="mStory" onclick="setMode('story')">📖 Video kể chuyện</button>
-  </div>
-  <button class="btn dub-only" onclick="pickFile()">▣ Chọn video</button>
-  <div id="urlbox" class="dub-only">
-    <input id="url" placeholder="Dán link YouTube / Bilibili / Douyin để tải về…"
-           onkeydown="if(event.key==='Enter')addUrl()">
-    <button onclick="addUrl()">Tải về</button>
+    <button id="mDub" class="on" onclick="setMode('dub')"><span>▦</span> Lồng tiếng video</button>
+    <button id="mStory" onclick="setMode('story')"><span>▤</span> Video kể chuyện <em>AI Story</em></button>
+    <button id="mVideoTools" onclick="setMode('tools')"><span>✂</span> Công cụ Video <em>Phụ trợ</em></button>
   </div>
   <div class="spacer"></div>
   <div class="selwrap dub-only">Hồ sơ
@@ -42,13 +36,23 @@
       <option>Thuyết minh 1 giọng</option>
     </select>
   </div>
-  <button class="btn dub-only" onclick="setTab('export')">⚙ Cài đặt</button>
+  <div class="top-chip dub-only" id="topGpu"><span>▧</span> GPU NVENC <i></i></div>
+  <div class="top-chip creator-chip"><i></i> By Crazyscholar</div>
+  <button class="btn settings-btn" onclick="openSettings()">⚙ Cài đặt</button>
 </div>
 
 <div id="main">
   <!-- LEFT -->
   <div id="left">
-    <div class="lhead"><span>HÀNG ĐỢI XỬ LÝ</span><span id="qcount">0 mục</span></div>
+    <div class="dub-source">
+      <div id="urlbox">
+        <textarea id="url" rows="2" placeholder="Dán link YouTube / Bilibili / Douyin… (mỗi dòng 1 link)"
+               onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();addUrl()}"></textarea>
+        <button onclick="addUrl()">⇩ Tải về</button>
+      </div>
+      <button class="btn pick-local" onclick="pickFile()">▣ Chọn video từ máy tính</button>
+    </div>
+    <div class="lhead"><span>HÀNG ĐỢI XỬ LÝ</span><span id="qcount">0 mục</span><span id="dlcount" class="dl-badge" style="display:none">⇩ 0</span></div>
     <div id="queue"></div>
     <div class="lfoot">
       <button class="btn" onclick="pickFile()">+ Thêm video vào hàng đợi</button>
@@ -56,6 +60,18 @@
         <button class="btn sm" style="flex:1" onclick="clearDone()">Xoá đã xong</button>
         <button class="btn sm" style="flex:1" onclick="saveProject()">Lưu danh sách</button>
       </div>
+    </div>
+    <div id="bot">
+      <div class="run-actions">
+        <button class="btn pri" id="runbtn" onclick="runAll()">▶ CHẠY TẤT CẢ</button>
+        <button class="btn danger" onclick="cancelRun()">Huỷ</button>
+      </div>
+      <div id="pwrap">
+        <div id="ptext"><b id="pstep">Sẵn sàng</b><span id="pdetail"></span></div>
+        <div id="pbar"><i></i></div>
+      </div>
+      <div class="bottom-stats"><span class="stat"><i></i> <b id="ppct">0%</b></span>
+        <span class="stat">GPU <b id="gpu">—</b></span></div>
     </div>
   </div>
 
@@ -78,6 +94,7 @@
       <div id="vwrap" style="display:none">
         <video id="video" preload="metadata"></video>
         <div id="layers"></div>
+        <div id="playOverlay" onclick="togglePlay()" title="Phát / Tạm dừng"><span>▶</span></div>
       </div>
     </div>
 
@@ -107,14 +124,14 @@
   <!-- RIGHT -->
   <div id="right">
     <div id="tabs">
-      <button class="btn" data-t="blur" onclick="setTab('blur')">Làm mờ</button>
-      <button class="btn on" data-t="sub" onclick="setTab('sub')">Phụ đề</button>
-      <button class="btn" data-t="logo" onclick="setTab('logo')">Logo</button>
-      <button class="btn" data-t="cut" onclick="setTab('cut')">Cắt video</button>
-      <button class="btn" data-t="asr" onclick="setTab('asr')">Nhận dạng</button>
-      <button class="btn" data-t="tr" onclick="setTab('tr')">Dịch</button>
-      <button class="btn" data-t="tts" onclick="setTab('tts')">Giọng đọc</button>
-      <button class="btn" data-t="export" onclick="setTab('export')">Xuất file</button>
+      <button class="tab-item" data-t="blur" onclick="setTab('blur')"><span class="tab-icon">▭</span><span class="tab-label">Làm mờ</span></button>
+      <button class="tab-item on" data-t="sub" onclick="setTab('sub')"><span class="tab-icon">T</span><span class="tab-label">Phụ đề</span></button>
+      <button class="tab-item" data-t="logo" onclick="setTab('logo')"><span class="tab-icon">▤</span><span class="tab-label">Logo</span></button>
+      <button class="tab-item" data-t="cut" onclick="setTab('cut')"><span class="tab-icon">✂</span><span class="tab-label">Cắt video</span></button>
+      <button class="tab-item" data-t="asr" onclick="setTab('asr')"><span class="tab-icon">◎</span><span class="tab-label">Nhận dạng</span></button>
+      <button class="tab-item" data-t="tr" onclick="setTab('tr')"><span class="tab-icon">⇄</span><span class="tab-label">Dịch</span></button>
+      <button class="tab-item" data-t="tts" onclick="setTab('tts')"><span class="tab-icon">♬</span><span class="tab-label">Giọng đọc</span></button>
+      <button class="tab-item" data-t="export" onclick="setTab('export')"><span class="tab-icon">⇩</span><span class="tab-label">Xuất file</span></button>
     </div>
     <div id="panel"></div>
   </div>
@@ -122,33 +139,83 @@
 
 <!-- ============ CHẾ ĐỘ 2: VIDEO KỂ CHUYỆN ============ -->
 <div id="storyMain" style="display:none">
-  <div id="sLeft">
-    <div class="lhead"><span>KHO ẢNH</span><span id="simgcount">0 ảnh</span></div>
-    <div id="simgs"></div>
-    <div class="lfoot">
-      <button class="btn" onclick="storyAddImgs()">+ Thêm ảnh</button>
-      <div style="display:flex;gap:6px">
-        <button class="btn sm" style="flex:1" onclick="storyAddFolder()">+ Thư mục ảnh</button>
-        <button class="btn sm" style="flex:1" onclick="storyClearImgs()">Xoá hết</button>
+<div id="sLeft">
+    <div class="story-scenes-head">
+      <div class="story-mode-toggle">
+        <button id="storyModeImg" class="btn sm on" onclick="storySetMediaMode('image')">🖼 Ảnh</button>
+        <button id="storyModeVid" class="btn sm" onclick="storySetMediaMode('video')">🎬 Video</button>
+        <span id="simgcount">0 ảnh</span>
+      </div>
+      <div class="story-scenes-actions" id="storyImageActions">
+        <button class="btn sm" onclick="storyAddImgs()">+ Thêm ảnh</button>
+        <button class="btn sm" onclick="storyAddFolder()">+ Thư mục</button>
+        <button class="btn sm" onclick="storyCreateImagePack()">✦ Prompt ảnh / Gemini</button>
+        <button class="btn sm danger" onclick="storyClearImgs()">Xoá hết</button>
+      </div>
+      <div class="story-scenes-actions" id="storyVideoActions" style="display:none">
+        <button class="btn sm" onclick="storyAddVideos()">+ Thêm video</button>
+        <button class="btn sm" onclick="storyAddVideoFolder()">+ Thư mục</button>
+        <button class="btn sm danger" onclick="storyClearVideos()">Xoá hết</button>
       </div>
     </div>
+    <div id="simgs"></div>
+    <div id="svideos" style="display:none"></div>
   </div>
   <div id="sCenter">
+    <div class="story-preview-head">
+      <div><span class="preview-icon">▦</span><b>Xem trước Video Kể Chuyện AI</b></div>
+      <div class="story-preview-badges"><span id="storySceneBadge">Cảnh 0/0</span><span id="storyAspectBadge">16:9</span></div>
+      <button class="btn pri sm" onclick="storyRunAll()">⇩ Xuất MP4</button>
+    </div>
     <div id="sstageWrap"><div id="sstage"></div></div>
+    <div class="story-transport">
+      <button class="story-round" onclick="storySelectRelative(-1)" title="Cảnh trước">|◀</button>
+      <button class="story-play" onclick="storyTogglePreview()" title="Phát/tạm dừng">▶</button>
+      <button class="story-round" onclick="storySelectRelative(1)" title="Cảnh sau">▶|</button>
+      <b id="storyTime">00:00 / 00:00</b>
+      <span class="spacer"></span>
+      <span id="storyPreviewTitle">Video kể chuyện AI</span>
+    </div>
     <div id="sinfo" class="hint" style="margin:0 12px 10px"></div>
   </div>
   <div id="sRight"><div id="spanel"></div></div>
 </div>
 
-<div id="bot">
-  <button class="btn pri" id="runbtn" onclick="runAll()">▶ CHẠY TẤT CẢ</button>
-  <button class="btn danger" onclick="cancelRun()">Huỷ</button>
-  <div id="pwrap">
-    <div id="ptext"><b id="pstep">Sẵn sàng</b><span id="pdetail"></span></div>
-    <div id="pbar"><i></i></div>
+<!-- ============ CHẾ ĐỘ 3: CÔNG CỤ VIDEO PHỤ TRỢ ============ -->
+<div id="videoToolsMain" style="display:none">
+  <div class="vt-shell">
+    <header class="vt-head">
+      <div class="vt-symbol">✂</div>
+      <div><h2>Công cụ Video phụ trợ</h2>
+        <p>Tải video nền riêng cho Audio hoặc cắt hàng loạt nhiều video. Không chạy viết truyện, TTS hay render.</p></div>
+      <span class="vt-independent">ĐỘC LẬP</span>
+    </header>
+    <nav class="vt-tabs">
+      <button id="vtTabDownload" onclick="setVideoToolsTab('download')">⇩ Tải video nền cho Audio</button>
+      <button id="vtTabCut" onclick="setVideoToolsTab('cut')">✂ Cắt video hàng loạt</button>
+    </nav>
+    <main id="videoToolsBody" class="vt-body"></main>
   </div>
-  <div class="stat"><b id="ppct">0%</b></div>
-  <div class="stat">GPU <b id="gpu">—</b></div>
+</div>
+
+<!-- Cài đặt dùng dữ liệu cấu hình/dự án hiện có, không tạo pipeline riêng -->
+<div id="settingsModal" class="modal-shell" aria-hidden="true" onclick="settingsBackdrop(event)">
+  <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <header class="settings-head">
+      <div class="settings-symbol">⚿</div>
+      <div><h2 id="settingsTitle">Cài Đặt Hệ Thống &amp; Cấu Hình AutoDub</h2>
+        <p>Tuỳ biến API dịch thuật AI, giọng đọc TTS và bộ tăng tốc GPU NVENC</p></div>
+      <button class="modal-close" onclick="closeSettings()" aria-label="Đóng">×</button>
+    </header>
+    <nav class="settings-tabs">
+      <button data-settings-tab="api" onclick="setSettingsTab('api')">◎ API Dịch &amp; AI</button>
+      <button data-settings-tab="voice" onclick="setSettingsTab('voice')">♬ Giọng Đọc &amp; Audio Ducking</button>
+      <button data-settings-tab="gpu" onclick="setSettingsTab('gpu')">▧ GPU NVENC &amp; Xuất Video</button>
+    </nav>
+    <div id="settingsBody" class="settings-body"></div>
+    <footer class="settings-foot"><button class="btn" onclick="closeSettings()">Đóng</button>
+      <button class="btn pri" onclick="saveSettingsModal()">Lưu cấu hình</button></footer>
+  </section>
 </div>
 
 <div id="toast"></div>

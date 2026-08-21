@@ -172,9 +172,9 @@ Câu tiếng Việt thường dài hơn bản gốc và timestamp video dài d�
 `diarization.enabled: true` + `hf_token` (free tại https://huggingface.co/settings/tokens, và bấm đồng ý điều khoản model `pyannote/speaker-diarization-3.1`). Cài thêm: bỏ `#` ở `pyannote.audio` trong `requirements.txt`.
 
 ### Tải video từ link (Bilibili/YouTube...)
-Chỉ cần dán link khi chạy. Chương trình dùng **yt-dlp** lấy đúng luồng gốc → **không có watermark do trang thêm vào**.
-- `download.quality`: `best` | `1080` | `720` | `480`.
-- Bản nét cần đăng nhập → đặt `download.cookies_from_browser: chrome` (hoặc `edge`/`firefox`) để mượn cookies từ trình duyệt bạn đã đăng nhập Bilibili.
+Chỉ cần dán link khi chạy. Link Bilibili được tải bằng API trực tiếp, tự dò nhiều CDN và tải 4 khối song song; từng khối lỗi sẽ đổi CDN và file `.part` được nối tiếp. Nếu API trực tiếp không dùng được, chương trình tự lui về **yt-dlp**. YouTube và các nguồn còn lại vẫn dùng yt-dlp.
+- `download.quality`: `best` | `1080` | `720` | `480` | `360`.
+- Video Bilibili công khai không cần mở Edge hay đọc cookie trình duyệt. Bản nét bị khóa đăng nhập vẫn có thể dùng `download.cookies_file` (cookies.txt), hoặc đường lui yt-dlp với `download.cookies_from_browser: edge:Default`.
 - Nếu video có **logo cháy cứng ở góc** (do người đăng chèn), yt-dlp không xoá được — dùng `video.delogo` bên dưới.
 
 ### Xoá logo cháy cứng ở góc
@@ -197,13 +197,17 @@ Chỉ cần dán link khi chạy. Chương trình dùng **yt-dlp** lấy đúng 
 ### Luồng một nút: từ tiêu đề ra luôn video
 
 Trong chế độ **📖 Video kể chuyện**, ô **0 — Tự viết truyện từ tiêu đề** nối trực
-tiếp tới công cụ ở thư mục anh em `../Tạo kịch bản`. Nhập tiêu đề, thêm ảnh ở cột
-trái rồi bấm **TẠO TRUYỆN → TỰ NẠP → RA VIDEO**. Quy trình tự làm tuần tự:
+tiếp tới công cụ ở thư mục anh em `../Tạo kịch bản`. Chỉ cần nhập tiêu đề rồi bấm
+**TẠO TRUYỆN → TẠO ẢNH → RA VIDEO**. Quy trình tự làm tuần tự:
 
 1. Lập thiết kế và viết từng chương bằng công cụ Tạo kịch bản.
 2. Xuất `KICH_BAN_DOC.txt` (chỉ có phần văn dành cho giọng đọc).
-3. Tự nạp file này vào giao diện AutoDubVN.
-4. Tạo TTS → nhạc nền → phụ đề khớp giọng → video từ ảnh.
+3. Rút 14 prompt ảnh bám theo 6 chương và lưu thành gói ảnh có manifest.
+4. Mặc định mở Gemini Pro bằng profile đã đăng nhập, tự chọn **Tạo hình ảnh**,
+   gửi từng cảnh, chờ và tải đủ ảnh; không cần API key. Chạy
+   `login_gemini.bat` một lần trước khi dùng và đóng cửa sổ đăng nhập sau khi
+   hoàn tất. Chế độ API chỉ chạy khi đặt `tao_anh.provider: api`.
+5. Khi đủ ảnh mới tạo TTS → nhạc nền → phụ đề khớp giọng → video từ ảnh.
 
 Không dùng `TOAN_BO.txt` làm đầu vào TTS vì file đó còn chứa bản thiết kế và báo
 cáo kiểm tra. Có thể đổi vị trí công cụ hoặc Python trong mục `tao_kich_ban` của
@@ -228,14 +232,34 @@ xuất một giọng đang hỏng.
 Nút **Phân tích & đề xuất giọng** đo thể loại, độ dài, mật độ đối thoại, sắc thái
 gia đình/bí ẩn/kinh dị/chiêm nghiệm và trọng tâm nhân vật ngay tại máy, sau đó xếp
 hạng 5 giọng thật đang có trong engine. Khi bật **Tự phân tích truyện và chọn giọng
-số 1**, luồng từ tiêu đề sẽ tự chọn giọng đứng đầu trước khi bắt đầu TTS; bạn vẫn
-có thể tắt để giữ nguyên giọng đã chọn thủ công.
+kể phù hợp**, cả luồng từ tiêu đề lẫn truyện dán tay đều tự chọn giọng kể đứng đầu;
+bạn vẫn có thể tắt để giữ nguyên giọng đã chọn thủ công.
+
+Bật **Đa giọng: mỗi nhân vật một giọng** để có dàn giọng thật: lời dẫn luôn dùng
+giọng kể, chỉ phần nằm trong dấu ngoặc kép/dấu gạch thoại mới chuyển sang giọng nhân
+vật. Với truyện do công cụ **Tạo kịch bản** sinh ra, AutoDub đọc luôn mục `NHÂN VẬT`
+trong `00_ban_thiet_ke.txt` để biết tên, tuổi, giới tính, quan hệ và sắc thái; với
+truyện dán tay, chương trình tự dò tên gọi trong nội dung. Giọng được chấm theo giới
+tính, nhóm tuổi (trẻ em/người trẻ/trưởng thành/lớn tuổi), chất trầm/sáng và độ hợp
+đối thoại, đồng thời tránh giọng robot/demon/hiệu ứng. Một nhân vật giữ đúng một
+voice id từ đầu đến cuối; tối đa 8 nhân vật nổi bật có giọng riêng.
+
+Giao diện hiện trước **dàn nhân vật → giọng được chọn → số lượt thoại** và có nút
+nghe thử từng vai. Những câu không đủ bằng chứng để biết chắc người nói sẽ dùng
+giọng kể thay vì đoán bừa. Sau khi dựng, sơ đồ dàn giọng và tỉ lệ nhận diện được lưu
+cạnh kết quả dưới dạng `*.giong.json`, thuận tiện kiểm tra hoặc tái dựng cùng dàn
+giọng. Phụ đề vẫn lấy từ timeline clip thật nên tiếp tục khớp cả khi hai nhân vật có
+tốc độ nói khác nhau.
 
 > Đang chạy một việc dài (dựng giọng, xuất video) thì nút nghe thử tạm báo "đang bận" — hai luồng TTS cùng lúc dễ bị CapCut chặn rate-limit, còn VieNeu thì nạp model hai lần.
 
 **Bước 2 — nhạc nền.** Chọn bài rồi bấm *Trộn nhạc nền vào giọng đọc*. Chưa có nhạc thì chương trình tự tải về vài bài.
 
 Nhạc lấy từ Wikimedia Commons và **chỉ nhận giấy phép CC0 hoặc Public Domain**, tức dùng thương mại thoải mái, không phải xin phép cũng không bắt buộc ghi công. Nguồn, tác giả và đường dẫn gốc của từng bài được ghi lại trong `assets/nhac_nen/nguon.json` để bạn ghi công nếu muốn. Chương trình không ghim sẵn đường dẫn bài hát nào mà hỏi thẳng danh mục lúc chạy, nên không lo link chết dần theo thời gian. Muốn dùng nhạc riêng thì chỉ cần chép file vào `assets/nhac_nen/`.
+
+Nếu Wikimedia trả `HTTP 429`, chương trình dừng tìm ngay và nghỉ 15 phút thay vì
+quét tiếp cây danh mục. Video vẫn dùng nhạc đã có trong máy; tên bài dài luôn giữ
+đuôi `.mp3`/`.flac` để kho nhận ra file vừa tải.
 
 Về mức âm: `nhac_nen.muc_db` mặc định `-38`, nằm trong khoảng bạn muốn (-40 đến -35). Con số này là mức nhạc **sau khi đã chuẩn hoá**, không phải lượng giảm đi. Chương trình đo mức trung bình của từng bài rồi bù đúng lượng cần thiết, nên bài thu to hay thu nhỏ cuối cùng đều nghe bằng nhau — đây là điểm khác biệt so với việc giảm cứng một số dB.
 
@@ -291,15 +315,15 @@ Hai chỗ chương trình làm thay bạn, vì đây là hai lỗi khiến cả 
 
 Cuối cùng nó in bảng tóm tắt: tổng số từ, số phút đọc, mốc `mm:ss` từng chương, và cảnh báo nếu chưa đủ 12.000 từ hoặc còn từ trong danh sách cấm (`tổng tài`, `trọng sinh`, `thiên kim`...).
 
-**Về ảnh.** Phiên bản hiện tại chưa tự sinh ảnh. Người dùng thêm ảnh hoặc thư mục ảnh
-ở cột trái trước khi chạy; AutoDub tự rải cảnh theo thời lượng, quay vòng khi thiếu
-và áp Ken Burns. Đây là chủ ý an toàn để không biến kênh thành slideshow AI theo
-một mẫu lặp lại. Bước tự sinh bộ ảnh bám từng chương nên được làm thành một module
-riêng có kiểm tra tính nhất quán nhân vật trước khi nối vào luồng một nút.
+**Về ảnh.** Luồng từ tiêu đề tự rút prompt theo bản thiết kế, có thể gọi Gemini
+Image API để tạo 14 ảnh. Cấu hình nằm trong `tao_anh`; API không khả dụng thì app
+không chạy video thiếu hình mà hiện prompt trong cửa sổ riêng, đồng thời lưu tại
+`output/story_image_packs/.../PROMPTS_AI_STUDIO.txt`. Ảnh thêm thủ công vẫn được
+giữ đúng thứ tự trong `manifest.json` và rải theo từng chương.
 
-Bản mẫu đang có trong `output/manual_video` dài gần 3 phút, 1920×1080/30fps,
-giọng CapCut, nhạc nền, phụ đề cứng và 8 cảnh Ken Burns. Luồng mới dùng lại đúng
-pipeline đã được kiểm thử đó sau khi hoàn thành kịch bản.
+Mỗi sản phẩm video kể chuyện được gom trong `output/<tên video>/` để dễ tìm; tên
+được làm sạch các ký tự Windows không cho phép. Luồng hoàn chỉnh xuất video,
+phụ đề và sơ đồ dàn giọng vào đúng thư mục mang tiêu đề đó.
 
 ---
 

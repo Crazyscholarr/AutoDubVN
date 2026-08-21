@@ -8,6 +8,8 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,6 +39,26 @@ class LocMauNhacCu(unittest.TestCase):
                   "File:Bach - Goldberg Variations BWV988 - 01. Aria.mp3",
                   "File:Allegro de Concert Op. 46 in A Major.mp3"):
             self.assertFalse(nn._la_mau_nhac_cu(t), t)
+
+
+class TaiNhacAnToan(unittest.TestCase):
+    def tearDown(self):
+        nn._WIKIMEDIA_BLOCKED_UNTIL = 0.0
+
+    def test_ten_dai_van_giu_duoi_file_am_thanh(self):
+        name = "Một bản nhạc có tên rất dài " * 8 + ".flac"
+        safe = nn._ten_file_an_toan(name)
+        self.assertLessEqual(len(safe), 80)
+        self.assertTrue(safe.endswith(".flac"), safe)
+
+    def test_gap_429_thi_dung_ngay_khong_quet_tiep_hang_chuc_danh_muc(self):
+        error = urllib.error.HTTPError(
+            nn.WIKIMEDIA_API, 429, "Too Many Requests", {}, None)
+        with mock.patch.object(nn, "_goi_api", side_effect=error) as goi:
+            self.assertEqual(nn.tim_nhac_online(
+                ["Classical music", "Musopen", "Piano music"]), [])
+        self.assertEqual(goi.call_count, 1)
+        self.assertGreater(nn._WIKIMEDIA_BLOCKED_UNTIL, 0)
 
 
 class BoLocTronNhac(unittest.TestCase):
@@ -134,6 +156,26 @@ class KhungHinhAnh(unittest.TestCase):
         self.assertIn("boxblur", filt)
         self.assertIn("overlay=(W-w)/2:(H-h)/2", filt)
         self.assertIn("force_original_aspect_ratio=decrease", filt)
+
+    def test_logo_tren_phai_duoc_ghep_truoc_phu_de(self):
+        filt = ss.build_story_overlay_filter(
+            1920, 1080,
+            {"enabled": True, "position": "top-right",
+             "width_pct": 12, "opacity": .8},
+            "C:/tmp/story.ass")
+        self.assertIn("scale=230:-2", filt)
+        self.assertIn("colorchannelmixer=aa=0.800", filt)
+        self.assertIn("overlay=x='W-w-", filt)
+        self.assertLess(filt.index("overlay="), filt.index("ass='"))
+
+    def test_logo_duoi_trai_khong_can_phu_de_van_co_dau_ra(self):
+        filt = ss.build_story_overlay_filter(
+            1080, 1920,
+            {"enabled": True, "position": "bottom-left",
+             "width_pct": 20, "opacity": 1.0})
+        self.assertIn("scale=216:-2", filt)
+        self.assertIn("y='H-h-", filt)
+        self.assertTrue(filt.endswith("[v]"))
 
 
 if __name__ == "__main__":

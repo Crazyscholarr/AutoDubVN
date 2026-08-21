@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
@@ -305,6 +306,7 @@ class SpeechMap:
 #  STATE["running"]), một bản đồ dùng chung là đủ và an toàn.
 # --------------------------------------------------------------------------- #
 _ACTIVE: Optional[SpeechMap] = None
+_ACTIVE_LOCK = threading.Lock()
 
 # Công tắc tắt bản đồ để so sánh trước/sau (dùng khi đo kiểm thử):
 #   AUTODUB_TAT_BAN_DO_THOAI=1 -> quay về cách chia theo tỉ lệ ký tự.
@@ -317,17 +319,20 @@ def disabled() -> bool:
 
 def set_active(m: Optional[SpeechMap]) -> Optional[SpeechMap]:
     global _ACTIVE
-    _ACTIVE = m if (m is not None and not m.empty) else None
-    return _ACTIVE
+    with _ACTIVE_LOCK:
+        _ACTIVE = m if (m is not None and not m.empty) else None
+        return _ACTIVE
 
 
 def get_active() -> Optional[SpeechMap]:
-    return None if disabled() else _ACTIVE
+    with _ACTIVE_LOCK:
+        return None if disabled() else _ACTIVE
 
 
 def clear_active() -> None:
     global _ACTIVE
-    _ACTIVE = None
+    with _ACTIVE_LOCK:
+        _ACTIVE = None
 
 
 def slice_window(start: float, end: float, weights: Sequence[float],

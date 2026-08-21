@@ -60,8 +60,43 @@ def _validate(settings: Dict) -> str:
     return entry
 
 
+def _append_cta_args(cmd: list, cta: Optional[Dict]) -> None:
+    """Chuyển cấu hình lời nhắc kênh của AutoDub sang CLI Tạo kịch bản."""
+    if not isinstance(cta, dict):
+        return
+    if not bool(cta.get("enabled", True)):
+        cmd.append("--no-channel-cta")
+        return
+    positions = cta.get("positions")
+    if not isinstance(positions, (list, tuple)):
+        positions = [12, 55]
+    cleaned = []
+    for value in positions:
+        try:
+            pct = max(5, min(90, int(float(value))))
+        except (TypeError, ValueError):
+            continue
+        if pct not in cleaned:
+            cleaned.append(pct)
+    for fallback in (12, 55):
+        if len(cleaned) >= 2:
+            break
+        if fallback not in cleaned:
+            cleaned.append(fallback)
+    cmd.extend(["--cta-positions", ",".join(map(str, cleaned))])
+    try:
+        speed = max(1.0, min(2.0, float(cta.get("speed", 2.0) or 2.0)))
+    except (TypeError, ValueError):
+        speed = 2.0
+    cmd.extend(["--cta-speed", str(speed)])
+    cta_text = str(cta.get("text") or "").strip()
+    if cta_text:
+        cmd.extend(["--cta-text", cta_text])
+
+
 def generate(title: str, cfg: Dict, log: Optional[Callable] = None,
-             progress: Optional[Callable] = None, cancel_event=None) -> Dict:
+             progress: Optional[Callable] = None, cancel_event=None,
+             cta: Optional[Dict] = None) -> Dict:
     """Chạy công cụ viết truyện và trả đường dẫn bản chỉ dành cho giọng đọc."""
     title = str(title or "").strip()
     if not title:
@@ -76,6 +111,7 @@ def generate(title: str, cfg: Dict, log: Optional[Callable] = None,
     result_json = os.path.join(result_dir, "result_%s.json" % uuid.uuid4().hex)
     cmd = [settings["python"], "-u", entry, "-t", title,
            "--result-json", result_json]
+    _append_cta_args(cmd, cta)
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         proc = subprocess.Popen(
@@ -132,26 +168,32 @@ def generate(title: str, cfg: Dict, log: Optional[Callable] = None,
     if not os.path.isfile(result_json):
         raise StoryWriterError("Công cụ đã chạy xong nhưng không trả file kết quả JSON.")
     try:
-        with open(result_json, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except (OSError, ValueError) as exc:
-        raise StoryWriterError("Không đọc được kết quả tạo kịch bản: %s" % exc) from exc
-
-    results = payload.get("results") if isinstance(payload, dict) else None
-    item = results[0] if isinstance(results, list) and results else None
-    if not isinstance(item, dict):
-        raise StoryWriterError("Kết quả tạo kịch bản không đúng định dạng.")
-    if item.get("error"):
-        raise StoryWriterError(str(item["error"]))
-    folder = os.path.abspath(str(item.get("folder") or ""))
-    script_path = os.path.join(folder, "KICH_BAN_DOC.txt")
-    if not os.path.isfile(script_path):
-        raise StoryWriterError("Không thấy bản dành cho giọng đọc: %s" % script_path)
-    return {
-        "title": str(item.get("title") or title),
-        "folder": folder,
-        "script_path": script_path,
-        "words": int(item.get("words") or 0),
-        "meta": item.get("meta") if isinstance(item.get("meta"), dict) else {},
-        "result_json": result_json,
-    }
+        try:
+            with open(result_json, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, ValueError) as exc:
+            raise StoryWriterError("Không đọc được kết quả tạo kịch bản: %s" % exc) from exc
+    
+        results = payload.get("results") if isinstance(payload, dict) else None
+        item = results[0] if isinstance(results, list) and results else None
+        if not isinstance(item, dict):
+            raise StoryWriterError("Kết quả tạo kịch bản không đúng định dạng.")
+        if item.get("error"):
+            raise StoryWriterError(str(item["error"]))
+        folder = os.path.abspath(str(item.get("folder") or ""))
+        script_path = os.path.join(folder, "KICH_BAN_DOC.txt")
+        if not os.path.isfile(script_path):
+            raise StoryWriterError("Không thấy bản dành cho giọng đọc: %s" % script_path)
+        return {
+            "title": str(item.get("title") or title),
+            "folder": folder,
+            "script_path": script_path,
+            "design_path": (os.path.join(folder, "00_ban_thiet_ke.txt")
+                            if os.path.isfile(os.path.join(folder, "00_ban_thiet_ke.txt")) else ""),
+            "words": int(item.get("words") or 0),
+            "meta": item.get("meta") if isinstance(item.get("meta"), dict) else {},
+            "result_json": result_json,
+        }
+    finally:
+        if os.path.exists(result_json):
+            os.remove(result_json)

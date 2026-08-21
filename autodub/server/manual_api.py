@@ -6,6 +6,7 @@ nhật vào STATE["manual"] cho giao diện poll.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
@@ -26,6 +27,65 @@ from .render import render_with_layers, render_with_layers_chunked
 JsonResult = Tuple[Dict, int]
 
 
+def _raise_if_cancelled() -> None:
+    if _CANCEL_EVENT.is_set():
+        raise InterruptedError("Đã dừng tác vụ theo yêu cầu.")
+
+
+def _mark_manual_cancelled(detail: str = "Các phần đã làm xong vẫn được giữ lại.") -> None:
+    """Đưa tác vụ kể chuyện về trạng thái dừng, không báo nhầm là lỗi."""
+    with _LOCK:
+        manual = STATE["manual"]
+        manual.update({
+            "working": False,
+            "status": "Đã dừng tác vụ",
+            "error": "",
+            "rev": int(manual.get("rev", 0)) + 1,
+        })
+    _progress(step="Đã dừng", detail=detail)
+    _log("Đã dừng tác vụ theo yêu cầu; dữ liệu hoàn tất vẫn được giữ lại.", "warn")
+
+
+def _story_output_dir(title: str) -> str:
+    """Thư mục sản phẩm video kể chuyện, đặt theo đúng tiêu đề dễ nhận biết."""
+    safe_title = _safe_path_stem(title, fallback="video_ke_chuyen", limit=70)
+    return os.path.join(HERE, "output", safe_title)
+
+
+def _story_tts_workdir(out_dir: str, title: str, stamp: str,
+                       engine: str) -> Tuple[str, int]:
+    """Tiếp tục các clip CapCut của lượt hỏng gần nhất nếu còn trên đĩa.
+
+    Tên mỗi clip CapCut chứa hash của nội dung + voice + tốc độ nên dùng lại
+    thư mục cũ vẫn an toàn khi người dùng sửa truyện hoặc đổi giọng: chỉ file có
+    đúng hash mới được tái sử dụng, phần khác sẽ được tạo mới.
+    """
+    tmp_root = os.path.join(out_dir, "_tmp")
+    fresh = os.path.join(tmp_root, f"{title}_{stamp}")
+    if str(engine or "").lower() != "capcut" or not os.path.isdir(tmp_root):
+        return fresh, 0
+    candidates = []
+    try:
+        for entry in os.scandir(tmp_root):
+            if not entry.is_dir() or not entry.name.startswith(title + "_"):
+                continue
+            try:
+                clips = sum(1 for item in os.scandir(entry.path)
+                            if item.is_file() and item.name.startswith("capcut_")
+                            and item.name.lower().endswith(".mp3")
+                            and item.stat().st_size >= 512)
+                if clips:
+                    candidates.append((entry.stat().st_mtime, clips, entry.path))
+            except OSError:
+                continue
+    except OSError:
+        return fresh, 0
+    if not candidates:
+        return fresh, 0
+    _mtime, clips, path = max(candidates, key=lambda item: item[0])
+    return path, clips
+
+
 def _lay_van_ban_tu_body(b: Dict) -> Tuple[str, Optional[JsonResult]]:
     """Lấy nội dung truyện từ body (text trực tiếp hoặc đường dẫn file txt)."""
     text = str(b.get("text") or "").strip()
@@ -44,6 +104,452 @@ def _lay_van_ban_tu_body(b: Dict) -> Tuple[str, Optional[JsonResult]]:
     if not text:
         return "", ({"error": "Hãy nhập văn bản cần đọc."}, 400)
     return text, None
+
+
+def _cta_tts_options(payload: Dict) -> Dict:
+    """Lấy tốc độ/nội dung CTA; tắt CTA thì tuyệt đối không tăng tốc câu nào."""
+    cta = payload.get("cta") if isinstance(payload.get("cta"), dict) else {}
+    if not bool(cta.get("enabled", True)):
+        return {"channel_cta_speed": 1.0, "channel_cta_text": ""}
+    try:
+        speed = max(1.0, min(2.0, float(cta.get("speed", 2.0) or 2.0)))
+    except (TypeError, ValueError):
+        speed = 2.0
+    return {"channel_cta_speed": speed,
+            "channel_cta_text": str(cta.get("text") or "").strip()}
+
+
+def _ensure_story_ctas(text: str, payload: Dict) -> str:
+    """Bổ sung CTA cho cả truyện dán tay; truyện do writer tạo sẵn không bị lặp."""
+    cta_cfg = payload.get("cta") if isinstance(payload.get("cta"), dict) else None
+    body = str(text or "").strip()
+    if not cta_cfg or not bool(cta_cfg.get("enabled", True)) or not body:
+        return body
+    template = str(cta_cfg.get("text") or "").strip() or (
+        "Bạn đang nghe chuyện tại gốc mít kể chuyện . Nếu thấy câu chuyện này ý nghĩa, "
+        "cô chú, anh chị nhớ đăng ký kênh, bật chuông và để lại một lời bình luận để "
+        "tiếp tục đồng hành cùng Gốc Mít nghen. Mọi nội dung đều hư cấu xin mọi người "
+        "không làm theo bất cứ dưới hình thức nào hoặc tung tin đồn , chúng tôi không "
+        "chịu trách nhiệm .")
+    cta = template.replace("{channel}", "Gốc Mít Kể Chuyện").strip()
+    raw_positions = cta_cfg.get("positions")
+    if not isinstance(raw_positions, (list, tuple)):
+        raw_positions = [12, 55]
+    positions = []
+    for value in raw_positions:
+        try:
+            pct = max(5, min(90, int(float(value))))
+        except (TypeError, ValueError):
+            continue
+        if pct not in positions:
+            positions.append(pct)
+    for fallback in (12, 55):
+        if len(positions) >= 2:
+            break
+        if fallback not in positions:
+            positions.append(fallback)
+    already = body.count(cta)
+    needed = max(0, len(positions) - already)
+    if not needed:
+        return body
+    words = list(re.finditer(r"\S+", body))
+    if len(words) < 2:
+        return (body + "\n\n" + "\n\n".join([cta] * needed)).strip()
+    cuts = []
+    for pct in sorted(positions[-needed:]):
+        target = max(1, min(len(words) - 1, int(len(words) * pct / 100.0)))
+        start = words[target - 1].end()
+        window = body[start:start + 1200]
+        paragraph = re.search(r"\n\s*\n", window)
+        sentence = re.search(r"[.!?][\"'”’)]*\s+", window)
+        candidates = [start + m.end() for m in (paragraph, sentence) if m]
+        cut = min(candidates) if candidates else start
+        if cut in cuts:
+            cut = start
+        if cut not in cuts:
+            cuts.append(cut)
+    for cut in sorted(cuts, reverse=True):
+        body = body[:cut].rstrip() + "\n\n" + cta + "\n\n" + body[cut:].lstrip()
+    return body
+
+
+def _story_design_text(payload: Dict) -> str:
+    """Tìm hồ sơ nhân vật cạnh KICH_BAN_DOC.txt; truyện dán tay vẫn dùng dò tên."""
+    explicit = str(payload.get("character_context_path") or "").strip().strip('"')
+    txt_path = str(payload.get("txt_path") or "").strip().strip('"')
+    candidates = [explicit]
+    if txt_path:
+        candidates.append(os.path.join(os.path.dirname(os.path.abspath(txt_path)),
+                                       "00_ban_thiet_ke.txt"))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            try:
+                return _doc_file_van_ban(path)
+            except Exception:
+                continue
+    return ""
+
+
+def _story_image_inputs(payload: Dict) -> list:
+    """Lấy ảnh trực tiếp hoặc khôi phục đúng thứ tự từ manifest đã lưu."""
+    anh = payload.get("anh")
+    if isinstance(anh, str):
+        anh = [x for x in re.split(r"[\r\n]+", anh) if x.strip()]
+    images = list(anh) if isinstance(anh, list) else []
+    if images:
+        return images
+    pack = str(payload.get("image_pack") or "").strip().strip('"')
+    if not pack:
+        return []
+    try:
+        from .. import story_images
+        return story_images.resolve_images(pack)
+    except Exception as exc:
+        _log("Không khôi phục được gói ảnh: %s" % exc, "warn")
+        return []
+
+
+def _story_title_key(value: str) -> str:
+    """Khoá so sánh tiêu đề, bỏ khác biệt hoa/thường và dấu câu."""
+    return re.sub(r"[^\w]+", " ", str(value or "").casefold(),
+                  flags=re.UNICODE).strip()
+
+
+def _story_video_inputs(payload: Dict) -> list:
+    raw = payload.get("video_sources", payload.get("source_videos", []))
+    if isinstance(raw, str):
+        raw = re.split(r"[\r\n]+", raw)
+    return [str(x.get("path") if isinstance(x, dict) else x).strip()
+            for x in (raw if isinstance(raw, list) else [])
+            if str(x.get("path") if isinstance(x, dict) else x).strip()]
+
+
+def _generated_story_image_inputs(payload: Dict, title: str) -> Tuple[Dict, list, str]:
+    """Không cho quy trình tự tạo ảnh mượn nhầm gói của truyện trước.
+
+    Cùng tiêu đề thì giữ gói để tiếp tục các cảnh còn thiếu. Tiêu đề khác và
+    đang bật tự tạo ảnh thì bỏ cả ``anh`` lẫn ``image_pack`` cũ, buộc Gemini
+    lập prompt và tạo một bộ ảnh độc lập.
+    """
+    clean_payload = dict(payload)
+    images = _story_image_inputs(clean_payload)
+    if not bool(clean_payload.get("auto_images", True)):
+        return clean_payload, images, ""
+    pack_path = str(clean_payload.get("image_pack") or "").strip().strip('"')
+    if not pack_path:
+        return clean_payload, images, ""
+    try:
+        from .. import story_images
+        manifest = story_images.load_pack(pack_path)
+        pack_title = str(manifest.get("title") or "").strip()
+    except Exception:
+        manifest = {}
+        pack_title = ""
+    if pack_title and _story_title_key(pack_title) == _story_title_key(title):
+        scene_count = len(manifest.get("scenes") or [])
+        ready_count = int(manifest.get("ready_count", 0) or 0)
+        if scene_count and ready_count < scene_count:
+            # Giữ manifest để lượt sau sinh tiếp đúng những cảnh còn thiếu,
+            # nhưng không đưa bộ ảnh dở dang sang bước dựng video.
+            clean_payload["anh"] = []
+            return clean_payload, [], ""
+        return clean_payload, images, ""
+    clean_payload["anh"] = []
+    clean_payload["image_pack"] = ""
+    return clean_payload, [], pack_title or "gói ảnh không xác định"
+
+
+def _story_slideshow_images(payload: Dict, fallback: list,
+                            total_duration: float) -> Tuple[list, bool]:
+    """Lập lịch ảnh theo chương từ manifest; trả (ảnh, có_lặp_chủ_ý)."""
+    pack = str(payload.get("image_pack") or "").strip().strip('"')
+    script_path = str(payload.get("txt_path") or "").strip().strip('"')
+    if not pack or not script_path:
+        return list(fallback), False
+    try:
+        from .. import story_images
+        weights = story_images.chapter_weights_from_script(script_path)
+        planned = story_images.expand_for_chapters(
+            pack, weights, total_duration=total_duration)
+        if planned:
+            _log("Gói ảnh: xếp %d cảnh theo %d chương, giữ đúng thứ tự manifest."
+                 % (len(planned), len(weights) or 1), "ok")
+            return planned, True
+    except Exception as exc:
+        _log("Không lập được lịch ảnh theo chương; dùng thứ tự ảnh thường: %s" % exc,
+             "warn")
+    return list(fallback), False
+
+
+def api_story_image_pack(b: Dict) -> JsonResult:
+    """Tạo/cập nhật gói prompt Gemini và ảnh đã tải về theo thứ tự cảnh."""
+    try:
+        from .. import kich_ban, story_images
+        manifest_path = str(b.get("manifest_path") or b.get("image_pack") or "").strip()
+        images = b.get("images", b.get("anh", []))
+        if isinstance(images, str):
+            images = [x for x in re.split(r"[\r\n]+", images) if x.strip()]
+        if manifest_path:
+            manifest = story_images.load_pack(manifest_path)
+            expected_title = str(b.get("expected_title") or "").strip()
+            pack_title = str(manifest.get("title") or "").strip()
+            if (expected_title and
+                    _story_title_key(expected_title) != _story_title_key(pack_title)):
+                owner = pack_title or "gói ảnh không xác định"
+                return {"error": ("Gói prompt này thuộc truyện '%s', không phải '%s'. "
+                                  "Hãy tạo kịch bản cho tiêu đề mới trước."
+                                  % (owner, expected_title))}, 409
+            if isinstance(images, list) and (images or b.get("replace_images")):
+                manifest = story_images.attach_images(manifest_path, images)
+            return story_images.public_summary(
+                manifest, include_prompt=bool(b.get("include_prompt", True))), 200
+
+        design = str(b.get("design_text") or "").strip() or _story_design_text(b)
+        design_path = str(b.get("character_context_path") or "").strip().strip('"')
+        txt_path = str(b.get("txt_path") or "").strip().strip('"')
+        if not design_path and txt_path:
+            candidate = os.path.join(os.path.dirname(os.path.abspath(txt_path)),
+                                     "00_ban_thiet_ke.txt")
+            if os.path.isfile(candidate):
+                design_path = candidate
+        try:
+            count = max(1, min(60, int(b.get("scene_count", 14) or 14)))
+        except (TypeError, ValueError):
+            count = 14
+        aspect = "9:16" if str(b.get("aspect") or "") == "9:16" else "16:9"
+        prompts = b.get("scene_prompts")
+        if not isinstance(prompts, list):
+            prompts = story_images.parse_scene_prompts(str(b.get("prompts_text") or ""))
+        master = str(b.get("master_prompt") or "").strip()
+        if not master:
+            if design:
+                master = kich_ban.prompt_anh(design, so_canh=count, kho=aspect)
+            else:
+                master = ("Hãy lập %d prompt ảnh %s theo đúng thứ tự cho truyện: %s. "
+                          "Giữ nhân vật và phong cách nhất quán; không chữ, logo hay watermark."
+                          % (count, aspect, str(b.get("title") or b.get("name") or "").strip()))
+        manifest = story_images.create_pack(
+            title=str(b.get("title") or b.get("name") or "Truyện").strip(),
+            design_text=design, master_prompt=master, scene_prompts=prompts,
+            image_paths=images if isinstance(images, list) else [],
+            aspect=aspect, scene_count=count, script_path=txt_path,
+            design_path=design_path)
+        return story_images.public_summary(manifest, include_prompt=True), 200
+    except Exception as exc:
+        return {"error": "Không tạo/cập nhật được gói ảnh: %s" % exc}, 500
+
+
+def api_story_image_pack_latest() -> JsonResult:
+    try:
+        from .. import story_images
+        manifest = story_images.latest_pack()
+        if not manifest:
+            return {"ok": True, "manifest_path": "", "images": []}, 200
+        return story_images.public_summary(manifest, include_prompt=False), 200
+    except Exception as exc:
+        return {"error": "Không đọc được gói ảnh gần nhất: %s" % exc}, 500
+
+
+def _story_image_generation_config(cfg: Dict) -> Tuple[Dict, str, str, str]:
+    """Tách cấu hình ảnh; browser tuyệt đối không mượn nhầm key dịch cũ."""
+    from .. import story_images
+
+    image_cfg = cfg.get("tao_anh") if isinstance(cfg.get("tao_anh"), dict) else {}
+    provider = str(image_cfg.get("provider") or "browser").strip().lower()
+    if provider not in {"api", "gemini"}:
+        return image_cfg, "browser", "", str(
+            image_cfg.get("gemini_image_model") or story_images.DEFAULT_IMAGE_MODEL)
+    tr_cfg = cfg.get("translation") if isinstance(cfg.get("translation"), dict) else {}
+    api_key = str(image_cfg.get("gemini_api_key") or
+                  tr_cfg.get("gemini_api_key") or "").strip()
+    model = str(image_cfg.get("gemini_image_model") or
+                story_images.DEFAULT_IMAGE_MODEL)
+    return image_cfg, "api", api_key, model
+
+
+def _prepare_generated_story_images(result: Dict, payload: Dict,
+                                    cfg: Dict) -> Tuple[list, str]:
+    """Từ kịch bản vừa viết: rút prompt rồi tự sinh ảnh bằng API hoặc Gemini web."""
+    from .. import kich_ban, story_images
+
+    image_cfg, image_provider, api_key, model = _story_image_generation_config(cfg)
+    manifest = None
+    existing_pack = str(payload.get("image_pack") or "").strip().strip('"')
+    if existing_pack:
+        try:
+            candidate = story_images.load_pack(existing_pack)
+            wanted_title = str(result.get("title") or payload.get("story_title") or "")
+            same_title = (_story_title_key(candidate.get("title")) ==
+                          _story_title_key(wanted_title))
+            scenes = list(candidate.get("scenes") or [])
+            if same_title and scenes and any(str(x.get("prompt") or "").strip()
+                                             for x in scenes):
+                manifest = candidate
+                _log("Tiếp tục gói ảnh đang dở: %d/%d cảnh đã có; chỉ tạo phần còn thiếu."
+                     % (int(candidate.get("ready_count", 0) or 0), len(scenes)), "ok")
+        except Exception as exc:
+            _log("Không tiếp tục được gói ảnh cũ; sẽ lập gói mới: %s" %
+                 str(exc)[:160], "warn")
+
+    if manifest is None:
+        try:
+            count = max(1, min(30, int(payload.get(
+                "scene_count", image_cfg.get("scene_count", 14)) or 14)))
+        except (TypeError, ValueError):
+            count = 14
+        aspect = "9:16" if str(payload.get("aspect") or "") == "9:16" else "16:9"
+        design_path = str(result.get("design_path") or "")
+        design = (_doc_file_van_ban(design_path)
+                  if design_path and os.path.isfile(design_path) else "")
+        master = kich_ban.prompt_anh(design, so_canh=count, kho=aspect)
+        _progress(pct=36, step="Chuẩn bị hình ảnh",
+                  detail="Rút prompt từng cảnh từ kịch bản")
+        prompts = story_images.generate_scene_prompts(
+            master, cfg, expected_count=count, logger=_log)
+        manifest = story_images.create_pack(
+            title=str(result.get("title") or payload.get("story_title") or "Truyện"),
+            design_text=design, master_prompt=master, scene_prompts=prompts,
+            aspect=aspect, scene_count=count,
+            script_path=str(result.get("script_path") or ""),
+            design_path=design_path)
+    else:
+        scenes = list(manifest.get("scenes") or [])
+        count = len(scenes)
+        aspect = str(manifest.get("aspect") or "16:9")
+        prompts = [str(scene.get("prompt") or "") for scene in scenes]
+    pack_path = str(manifest.get("manifest_path") or "")
+    prompt_path = str(manifest.get("prompt_file") or "")
+    ready_at_start = int(manifest.get("ready_count", 0) or 0)
+    with _LOCK:
+        manual = STATE["manual"]
+        manual.update({
+            "image_pack_path": pack_path,
+            "image_prompt_path": prompt_path,
+            "image_provider_url": story_images.GEMINI_WEB_URL,
+            "image_scene_count": count,
+            "image_ready_count": ready_at_start,
+            "image_prompt_ready": False,
+            "image_generation_status": (
+                "Tiếp tục từ %d/%d ảnh…" % (ready_at_start, count)
+                if ready_at_start else
+                "Đã tạo prompt; chuẩn bị sinh ảnh…" if image_provider == "api"
+                else "Đã tạo prompt; chuẩn bị tự tạo ảnh trên Gemini…"),
+            "status": "Đã viết truyện; đang chuẩn bị hình ảnh…",
+            "rev": int(manual.get("rev", 0)) + 1,
+        })
+
+    auto_images = bool(payload.get(
+        "auto_images", image_cfg.get("auto_generate", True)))
+    automation_error = ""
+
+    def _image_progress(done, total, message=""):
+        pct = 38 + 10 * float(done) / max(1, int(total))
+        _progress(pct=pct, step="Tự tạo ảnh Gemini", detail=message)
+        with _LOCK:
+            manual = STATE["manual"]
+            manual.update({
+                "image_ready_count": int(done),
+                "image_generation_status": message,
+                "status": "Đang tự tạo ảnh %d/%d…" % (done, total),
+                "rev": int(manual.get("rev", 0)) + 1,
+            })
+
+    if auto_images and image_provider == "api" and prompts and api_key:
+        try:
+            manifest = story_images.generate_images_gemini(
+                pack_path, api_key, model=model,
+                timeout=float(image_cfg.get("timeout_seconds", 180) or 180),
+                max_retries=int(image_cfg.get("max_retries", 3) or 3),
+                request_gap=float(image_cfg.get("request_gap_seconds", 1.5) or 0),
+                logger=_log, progress=_image_progress,
+                cancel_event=_CANCEL_EVENT)
+        except Exception as exc:
+            _log("Tự tạo ảnh Gemini chưa hoàn tất: %s" % str(exc)[:220], "warn")
+            automation_error = str(exc)
+            manifest = story_images.load_pack(pack_path)
+    elif auto_images and image_provider == "browser" and prompts:
+        settings = story_images.gemini_browser_settings(cfg)
+        _log("Dùng Gemini Pro đã đăng nhập; app sẽ tự gửi từng prompt và tải "
+             "ảnh, không dùng API key.", "info")
+        try:
+            manifest = story_images.generate_images_gemini_browser(
+                pack_path, profile_dir=settings["profile_dir"],
+                channel=settings["channel"], url=settings["url"],
+                timeout=settings["timeout"], max_retries=settings["retries"],
+                request_gap=settings["request_gap"], logger=_log,
+                progress=_image_progress, cancel_event=_CANCEL_EVENT)
+        except Exception as exc:
+            automation_error = str(exc)
+            _log("Tự tạo ảnh qua Gemini web chưa hoàn tất: %s" %
+                 automation_error[:220], "warn")
+            manifest = story_images.load_pack(pack_path)
+    elif auto_images and not prompts:
+        automation_error = "Chưa rút được danh sách prompt từng cảnh."
+        _log("Chưa có danh sách prompt từng cảnh; giữ prompt tổng để xử lý lại.",
+             "warn")
+    elif auto_images and not api_key:
+        automation_error = "Chưa có Gemini API key cho ảnh."
+        _log("Chưa có Gemini API key cho ảnh; giữ gói prompt để xử lý lại.",
+             "warn")
+
+    images = story_images.resolve_images(pack_path)
+    complete = bool(images) and len(images) >= count
+    with _LOCK:
+        manual = STATE["manual"]
+        manual.update({
+            "image_ready_count": len(images),
+            "image_prompt_ready": not complete,
+            "image_generation_status": (
+                "Đã tạo đủ %d ảnh" % len(images) if complete else
+                "Tự động Gemini lỗi: %s" % automation_error[:180]
+                if automation_error else
+                "Đang chờ ảnh: đã có %d/%d" % (len(images), count)),
+            "rev": int(manual.get("rev", 0)) + 1,
+        })
+    return images if complete else [], pack_path
+
+
+def _story_voice_plan(source_text: str, payload: Dict, cfg: Dict, engine: str,
+                      voice: str, pitch: str) -> Optional[Dict]:
+    """Lập dàn giọng khi bật tự chọn giọng hoặc đa giọng nhân vật."""
+    auto_narrator = bool(payload.get("voice_auto", False))
+    multi_voice = bool(payload.get("multi_voice", False))
+    if not auto_narrator and not multi_voice:
+        return None
+    from .. import story_voice, tts as tts_mod
+    catalog = tts_mod.list_voices(engine)
+    if not catalog:
+        _log("Không có catalog giọng để lập dàn nhân vật; dùng giọng đã chọn.", "warn")
+        return None
+    narrator_voice = voice
+    if engine == "edge":
+        normalized = tts_mod.normalize_edge_narrator({"voice": voice, "pitch": pitch})
+        narrator_voice = "%s|%s" % (normalized["voice"], normalized["pitch"])
+    plan = story_voice.plan_story_voices(
+        source_text, catalog, engine=engine, narrator_voice=narrator_voice,
+        design_text=_story_design_text(payload), auto_narrator=auto_narrator,
+        max_characters=max(1, min(12, int(payload.get("max_character_voices", 8) or 8))))
+    if not multi_voice:
+        plan["cast"] = []
+        plan["utterances"] = None
+    return plan
+
+
+def _save_voice_cast(path: str, plan: Optional[Dict]) -> str:
+    if not plan:
+        return ""
+    payload = {k: v for k, v in plan.items() if k not in {"utterances", "characters"}}
+    payload["characters"] = [
+        {k: v for k, v in item.items() if k != "aliases"}
+        for item in (plan.get("characters") or [])
+    ]
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        return os.path.abspath(path)
+    except OSError as exc:
+        _log("Không lưu được sơ đồ dàn giọng: %s" % exc, "warn")
+        return ""
 
 
 def _segments_tu_timeline(timeline) -> list:
@@ -210,17 +716,22 @@ def api_manual_tts(b: Dict) -> JsonResult:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " +
                     (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
         STATE["busy"] = "Đang tạo audio từ văn bản…"
         manual = STATE["manual"]
         manual.update({"working": True, "status": "Đang tổng hợp giọng…",
                        "error": "", "output_path": "",
+                       "voice_cast": [], "voice_assignment_coverage": 0.0,
+                       "voice_cast_path": "",
                        "rev": int(manual.get("rev", 0)) + 1})
     _progress(pct=5, step="Tạo audio", detail="Đang chuẩn bị văn bản")
 
     def _manual_tts_work(payload=dict(b), source_text=text):
         try:
             from .. import tts as tts_mod
+            source_text = _ensure_story_ctas(source_text, payload)
             cfg = _load_cfg()
             tc = cfg.get("tts", {}) or {}
             engine = str(payload.get("engine") or tc.get("engine") or "edge").lower()
@@ -239,6 +750,14 @@ def api_manual_tts(b: Dict) -> JsonResult:
             workdir = os.path.join(out_dir, "_tmp", f"{title}_{stamp}")
             out_path = os.path.join(out_dir, f"{title}_{stamp}.mp3")
             os.makedirs(workdir, exist_ok=True)
+            voice_plan = _story_voice_plan(
+                source_text, payload, cfg, engine, voice, pitch)
+            if voice_plan:
+                voice = str((voice_plan.get("narrator") or {}).get("id") or voice)
+                if voice_plan.get("cast"):
+                    _log("Dàn giọng: người kể + %d nhân vật; nhận diện chắc %.1f%% lượt thoại."
+                         % (len(voice_plan["cast"]),
+                            float(voice_plan.get("assignment_coverage") or 0)), "ok")
             _log(f"Tạo audio thủ công: engine={engine}, voice={voice}, rate={rate}", "step")
             _progress(pct=15, step="Tạo audio", detail=f"Đang đọc bằng {engine}")
             result = tts_mod.synthesize_text_audio(
@@ -252,7 +771,12 @@ def api_manual_tts(b: Dict) -> JsonResult:
                 vieneu_options=tc.get("vieneu_options"),
                 capcut_options=tc.get("capcut_options"),
                 max_chunk_chars=240,   # đoạn ngắn -> mốc phụ đề mịn hơn
+                utterances=(voice_plan or {}).get("utterances"),
+                **_cta_tts_options(payload),
+                cancel_event=_CANCEL_EVENT,
             )
+            cast_path = _save_voice_cast(os.path.splitext(out_path)[0] + ".giong.json",
+                                         voice_plan)
             # Lưu phụ đề khớp giọng đọc để bước dựng video ghi cứng lên hình.
             srt_path = os.path.splitext(out_path)[0] + ".srt"
             try:
@@ -267,10 +791,16 @@ def api_manual_tts(b: Dict) -> JsonResult:
                                "audio_path": result["path"],
                                "audio_duration": result["duration"],
                                "srt_path": srt_path,
+                               "voice_cast": (voice_plan or {}).get("cast") or [],
+                               "voice_assignment_coverage": float(
+                                   (voice_plan or {}).get("assignment_coverage") or 0),
+                               "voice_cast_path": cast_path,
                                "error": "",
                                "rev": int(manual.get("rev", 0)) + 1})
             _progress(pct=100, step="Tạo audio",
                       detail=os.path.basename(result["path"]))
+        except InterruptedError:
+            _mark_manual_cancelled("Đã giữ lại các đoạn giọng tạo xong.")
         except Exception as e:
             _log(f"Tạo audio từ văn bản lỗi: {e}", "err")
             with _LOCK:
@@ -325,6 +855,8 @@ def api_manual_nhac_nen(b: Dict) -> JsonResult:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " +
                     (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
         STATE["busy"] = "Đang trộn nhạc nền…"
         manual = STATE["manual"]
@@ -365,6 +897,8 @@ def api_manual_nhac_nen(b: Dict) -> JsonResult:
                                "rev": int(manual.get("rev", 0)) + 1})
             _progress(pct=100, step="Trộn nhạc nền xong",
                       detail=os.path.basename(result["path"]))
+        except InterruptedError:
+            _mark_manual_cancelled()
         except Exception as e:
             _log(f"Trộn nhạc nền lỗi: {e}", "err")
             with _LOCK:
@@ -386,25 +920,29 @@ def api_manual_slideshow(b: Dict) -> JsonResult:
     with _LOCK:
         current = str((STATE.get("manual") or {}).get("audio_path") or "")
     audio_path = str(b.get("audio_path") or current).strip().strip('"')
-    anh = b.get("anh")
-    if isinstance(anh, str):
-        anh = [x for x in re.split(r"[\r\n]+", anh) if x.strip()]
-    if not isinstance(anh, list) or not anh:
-        return {"error": "Hãy chọn ảnh hoặc thư mục ảnh."}, 400
+    anh = _story_image_inputs(b)
+    video_sources = _story_video_inputs(b)
+    if not anh and not video_sources:
+        return {"error": "Hãy chọn ảnh, thư mục ảnh hoặc video nguồn."}, 400
     if not audio_path or not os.path.isfile(audio_path):
         return {"error": "Hãy tạo giọng đọc trước khi dựng video."}, 400
     with _LOCK:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " +
                     (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
-        STATE["busy"] = "Đang dựng video từ ảnh…"
+        render_kind = "video nguồn" if video_sources else "ảnh"
+        STATE["busy"] = f"Đang dựng video từ {render_kind}…"
         manual = STATE["manual"]
-        manual.update({"working": True, "status": "Đang dựng video từ ảnh…",
+        manual.update({"working": True, "status": f"Đang dựng video từ {render_kind}…",
                        "error": "", "output_path": "",
+                       "source_videos": video_sources,
                        "rev": int(manual.get("rev", 0)) + 1})
 
     def _slideshow_work(payload=dict(b), imgs=list(anh),
+                        source_videos=list(video_sources),
                         voice=os.path.abspath(audio_path)):
         try:
             from .. import slideshow as ss
@@ -418,7 +956,7 @@ def api_manual_slideshow(b: Dict) -> JsonResult:
                 payload.get("name") or os.path.splitext(
                     os.path.basename(voice))[0],
                 fallback="video_ke_chuyen", limit=70)
-            out_dir = os.path.join(HERE, "output", "manual_video")
+            out_dir = _story_output_dir(title)
             workdir = os.path.join(out_dir, "_tmp", title)
             out_path = os.path.join(out_dir, f"{title}.mp4")
             os.makedirs(workdir, exist_ok=True)
@@ -432,11 +970,62 @@ def api_manual_slideshow(b: Dict) -> JsonResult:
                 if not ass_path:
                     _log("Chưa có phụ đề khớp giọng đọc (hãy tạo audio bằng app "
                          "trước) - dựng video không phụ đề.", "warn")
-            result = ss.tao_video_tu_anh(
-                imgs, voice, out_path, workdir=workdir,
-                w=w, h=h, fps=fps, kieu=kieu, ass_path=ass_path,
-                progress=lambda pct, detail: _progress(
-                    pct=pct, step="Dựng video từ ảnh", detail=detail))
+            if source_videos:
+                clip_min = float(payload.get("source_clip_min_seconds", 300) or 300)
+                clip_max = float(payload.get(
+                    "source_clip_max_seconds",
+                    payload.get("source_clip_seconds", 600)) or 600)
+                random_pick = bool(payload.get("source_random", True))
+                _log(
+                    "[Kể chuyện] Dùng lại audio có sẵn; bắt đầu %s %d mục "
+                    "video nguồn (mỗi đoạn %.1f–%.1f phút)."
+                    % ("random" if random_pick else "xếp tuần tự",
+                       len(source_videos), clip_min / 60.0, clip_max / 60.0),
+                    "step")
+
+                def _video_progress(pct, detail):
+                    _progress(pct=pct, step="Dựng video từ video nguồn",
+                              detail=detail)
+                    if (float(pct) <= 3.0 or
+                            str(detail).startswith("FFmpeg vẫn đang ghép")):
+                        _log("[Kể chuyện] " + str(detail), "step")
+
+                result = ss.tao_video_tu_video(
+                    source_videos, voice, out_path, workdir=workdir,
+                    w=w, h=h, fps=fps,
+                    hieu_ung=str(payload.get("source_effect") or "tinh"),
+                    ass_path=ass_path,
+                    logo=(payload.get("logo") if isinstance(payload.get("logo"), dict)
+                          else None),
+                    character=(payload.get("character")
+                               if isinstance(payload.get("character"), dict)
+                               else None),
+                    source_cover=str(payload.get("source_cover") or "none"),
+                    min_seconds=clip_min, max_seconds=clip_max,
+                    random_pick=random_pick,
+                    random_seed=int(payload.get("source_random_seed", 0) or 0) or None,
+                    transform=(payload.get("source_transform")
+                               if isinstance(payload.get("source_transform"), dict)
+                               else None),
+                    blur_regions=(payload.get("regions")
+                                  if isinstance(payload.get("regions"), list)
+                                  else None),
+                    blur_bottom_ratio=float(payload.get("blur_bottom_ratio", 0) or 0),
+                    progress=_video_progress)
+            else:
+                render_imgs, keep_repeats = _story_slideshow_images(
+                    payload, imgs, ffprobe_duration(voice))
+                result = ss.tao_video_tu_anh(
+                    render_imgs, voice, out_path, workdir=workdir,
+                    w=w, h=h, fps=fps, kieu=kieu, ass_path=ass_path,
+                    logo=(payload.get("logo") if isinstance(payload.get("logo"), dict)
+                          else None),
+                    character=(payload.get("character")
+                               if isinstance(payload.get("character"), dict)
+                               else None),
+                    giu_canh_lap=keep_repeats,
+                    progress=lambda pct, detail: _progress(
+                        pct=pct, step="Dựng video từ ảnh", detail=detail))
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({"working": False,
@@ -445,9 +1034,16 @@ def api_manual_slideshow(b: Dict) -> JsonResult:
                                "rev": int(manual.get("rev", 0)) + 1})
             _progress(pct=100, step="Dựng video xong",
                       detail=os.path.basename(result["path"]))
-            _log(f"Đã dựng video từ {result['so_anh']} ảnh: {result['path']}", "ok")
+            if source_videos:
+                _log("Đã random %d đoạn từ %d video nguồn: %s"
+                     % (result["so_doan"], result["so_video"], result["path"]), "ok")
+            else:
+                _log(f"Đã dựng video từ {result['so_anh']} ảnh: {result['path']}", "ok")
+        except InterruptedError:
+            _mark_manual_cancelled(
+                "Đã dừng dựng video; audio và nguồn hình vẫn được giữ lại.")
         except Exception as e:
-            _log(f"Dựng video từ ảnh lỗi: {e}", "err")
+            _log(f"Dựng video từ nguồn hình lỗi: {e}", "err")
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({"working": False, "status": "Dựng video lỗi",
@@ -464,7 +1060,7 @@ def api_manual_slideshow(b: Dict) -> JsonResult:
 
 
 def api_story_voice_recommendations(b: Dict) -> JsonResult:
-    """Phân tích nội dung tại máy và đề xuất giọng chỉ từ catalog đang có."""
+    """Phân tích nội dung, nhân vật và đề xuất cả dàn giọng từ catalog đang có."""
     text, err = _lay_van_ban_tu_body(b)
     if err:
         return err
@@ -476,12 +1072,239 @@ def api_story_voice_recommendations(b: Dict) -> JsonResult:
         voices = tts_mod.list_voices(engine)
         if not voices:
             return {"error": "Không lấy được danh sách giọng %s." % engine}, 503
-        result = story_voice.recommend_voices(text, voices, engine=engine, limit=5)
+        result = story_voice.plan_story_voices(
+            text, voices, engine=engine,
+            narrator_voice=str(b.get("voice") or ""),
+            design_text=_story_design_text(b), auto_narrator=True,
+            max_characters=max(1, min(12, int(b.get("max_character_voices", 8) or 8))))
+        result.pop("utterances", None)  # không trả hàng nghìn lượt thoại qua HTTP
+        for character in result.get("characters") or []:
+            character.pop("aliases", None)
         result["engine"] = engine
         result["catalog_count"] = len(voices)
         return result, 200
     except Exception as exc:
         return {"error": "Không phân tích được giọng phù hợp: %s" % exc}, 500
+
+
+def api_story_search_sources(b: Dict) -> JsonResult:
+    """Tìm video Bilibili/YouTube theo từ khóa cho tab Kể chuyện AI."""
+    keyword = str(b.get("keyword") or "").strip()
+    try:
+        limit = max(1, min(50, int(b.get("limit", 10) or 10)))
+    except (TypeError, ValueError):
+        limit = 10
+    if not keyword:
+        return {"error": "Hãy nhập từ khóa tìm video Bilibili."}, 400
+    try:
+        from .. import story_sources
+        cfg = _load_cfg().get("download", {}) or {}
+        provider = str(b.get("provider") or "bilibili").strip().lower()
+        rows = story_sources.search(
+            keyword, limit=limit, provider=provider,
+            cookies_from_browser=cfg.get("cookies_from_browser"),
+            cookies_file=cfg.get("cookies_file"))
+        with _LOCK:
+            manual = STATE["manual"]
+            manual.update({"source_keyword": keyword, "source_results": rows,
+                           "source_status": "Tìm thấy %d video" % len(rows),
+                           "rev": int(manual.get("rev", 0)) + 1})
+        return {"ok": True, "keyword": keyword, "provider": provider,
+                "results": rows}, 200
+    except Exception as exc:
+        return {"error": "Tìm nguồn video thất bại: %s" % exc}, 500
+
+
+def api_story_reference_catalog(b: Dict = None) -> JsonResult:
+    """Danh mục nguồn tham khảo và bộ từ khóa tiếng Trung cho truyện mới."""
+    try:
+        from .. import story_sources
+        return {"ok": True, "sources": story_sources.reference_catalog(),
+                "chinese_keywords": story_sources.chinese_keyword_catalog()}, 200
+    except Exception as exc:
+        return {"error": "Không đọc được danh mục nguồn tham khảo: %s" % exc}, 500
+
+
+def api_story_search_references(b: Dict) -> JsonResult:
+    """Tìm tiêu đề/snippet tham khảo từ các website đã chọn, không sao chép bài."""
+    keyword = str(b.get("keyword") or "").strip()
+    if not keyword:
+        return {"error": "Hãy nhập từ khóa tham khảo tiếng Trung hoặc tiếng Việt."}, 400
+    try:
+        limit = max(1, min(50, int(b.get("limit", 20) or 20)))
+    except (TypeError, ValueError):
+        limit = 20
+    source_keys = b.get("source_keys") or []
+    if isinstance(source_keys, str):
+        source_keys = re.split(r"[,\s]+", source_keys)
+    try:
+        from .. import story_sources
+        rows = story_sources.search_web_references(keyword, source_keys, limit)
+        with _LOCK:
+            manual = STATE["manual"]
+            manual.update({"reference_keyword": keyword, "reference_results": rows,
+                           "reference_status": "Tìm thấy %d bài tham khảo" % len(rows),
+                           "rev": int(manual.get("rev", 0)) + 1})
+        return {"ok": True, "keyword": keyword, "results": rows}, 200
+    except Exception as exc:
+        return {"error": "Tìm bài tham khảo thất bại: %s" % exc}, 500
+
+
+def api_story_cut_sources(b: Dict) -> JsonResult:
+    """Cắt video nền thành các clip ngắn để random-pick theo audio."""
+    raw = b.get("video_sources", b.get("paths", []))
+    if isinstance(raw, str):
+        raw = re.split(r"[\r\n]+", raw)
+    paths = [str(x.get("path") if isinstance(x, dict) else x).strip()
+             for x in (raw if isinstance(raw, list) else []) if str(x).strip()]
+    if not paths:
+        return {"error": "Hãy chọn video nền trước khi cắt."}, 400
+    try:
+        min_seconds = max(2.0, float(b.get("min_seconds", 300) or 300))
+        max_seconds = max(min_seconds, float(b.get("max_seconds", 600) or 600))
+    except (TypeError, ValueError):
+        min_seconds, max_seconds = 300.0, 600.0
+    with _LOCK:
+        if STATE["running"] or STATE["busy"]:
+            return {"error": "Đang bận: " + (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
+        STATE["running"] = True
+        STATE["busy"] = "Đang cắt video nền thành đoạn nhỏ"
+        manual = STATE["manual"]
+        manual.update({"cut_status": "Đang chuẩn bị cắt video…", "cut_done": 0,
+                       "cut_total": len(paths), "error": "",
+                       "rev": int(manual.get("rev", 0)) + 1})
+
+    def _work(source_paths=list(paths), lo=min_seconds, hi=max_seconds,
+              payload=dict(b)):
+        try:
+            from .. import story_sources
+            title = _safe_path_stem(str(payload.get("name") or "story_clips"),
+                                    fallback="story_clips", limit=60)
+            out_dir = os.path.join(HERE, "downloads", "story_clips", title)
+
+            def progress(done, total, message):
+                with _LOCK:
+                    manual = STATE["manual"]
+                    manual.update({"cut_status": "%d/%d: %s" % (done, total, message),
+                                   "cut_done": done, "cut_total": total,
+                                   "rev": int(manual.get("rev", 0)) + 1})
+                _progress(pct=done * 100.0 / max(1, total),
+                          step="Cắt video nền", detail=message)
+
+            clips = story_sources.cut_video_segments(
+                source_paths, out_dir, min_seconds=lo, max_seconds=hi,
+                progress=progress)
+            with _LOCK:
+                manual = STATE["manual"]
+                manual.update({"source_videos": clips, "source_clips": clips,
+                               "cut_status": "Đã cắt %d clip" % len(clips),
+                               "cut_done": len(source_paths), "cut_total": len(source_paths),
+                               "error": "", "rev": int(manual.get("rev", 0)) + 1})
+            _progress(pct=100, step="Cắt video xong", detail="%d clip sẵn sàng" % len(clips))
+        except InterruptedError:
+            _mark_manual_cancelled("Đã dừng cắt video; các clip đã tạo vẫn được giữ lại.")
+        except Exception as exc:
+            _log("Cắt video nền lỗi: %s" % exc, "err")
+            with _LOCK:
+                manual = STATE["manual"]
+                manual.update({"cut_status": "Cắt lỗi", "error": str(exc)[:300],
+                               "rev": int(manual.get("rev", 0)) + 1})
+            _progress(pct=100, step="Cắt video lỗi", detail=str(exc)[:160])
+        finally:
+            with _LOCK:
+                STATE["running"] = False
+                STATE["busy"] = ""
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"ok": True, "async": True, "total": len(paths)}, 200
+
+
+def api_story_download_sources(b: Dict) -> JsonResult:
+    """Tải hàng loạt link đã chọn, cập nhật tiến độ qua /api/state."""
+    raw = b.get("links", b.get("urls", []))
+    if isinstance(raw, str):
+        raw = re.split(r"[\r\n]+", raw)
+    links = [str(x.get("url") if isinstance(x, dict) else x).strip()
+             for x in (raw if isinstance(raw, list) else [])]
+    links = [x for x in links if x]
+    if not links:
+        return {"error": "Hãy chọn video tìm được hoặc dán danh sách link."}, 400
+    with _LOCK:
+        if STATE["running"] or STATE["busy"]:
+            return {"error": "Đang bận: " + (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
+        STATE["running"] = True
+        STATE["busy"] = "Đang tải video nền…"
+        manual = STATE["manual"]
+        manual.update({"working": True, "source_links": links,
+                       "source_videos": [], "source_done": 0,
+                       "source_total": len(links),
+                       "source_status": "Đang chuẩn bị tải %d video…" % len(links),
+                       "error": "", "rev": int(manual.get("rev", 0)) + 1})
+
+    def _work(payload=dict(b), urls=list(links)):
+        try:
+            from .. import story_sources
+            cfg = _load_cfg().get("download", {}) or {}
+            title = _safe_path_stem(str(payload.get("name") or "story_sources"),
+                                    fallback="story_sources", limit=60)
+            out_dir = os.path.join(HERE, "downloads", "story_sources", title)
+
+            def progress(done, total, message):
+                with _LOCK:
+                    manual = STATE["manual"]
+                    manual.update({"source_done": done, "source_total": total,
+                                   "source_status": "%d/%d: %s" %
+                                   (done, total, message),
+                                   "rev": int(manual.get("rev", 0)) + 1})
+                _progress(pct=done * 100.0 / max(1, total),
+                          step="Tải video nền", detail=message)
+
+            def live_progress(pct, detail):
+                with _LOCK:
+                    manual = STATE["manual"]
+                    manual.update({"source_status": str(detail)[:260],
+                                   "rev": int(manual.get("rev", 0)) + 1})
+                _progress(pct=float(pct), step="Tải video nền",
+                          detail=str(detail)[:260])
+
+            result = story_sources.download_many(
+                urls, out_dir, quality=str(cfg.get("quality") or "best"),
+                cookies_from_browser=cfg.get("cookies_from_browser"),
+                cookies_file=cfg.get("cookies_file"),
+                concurrent_fragments=int(cfg.get("concurrent_fragments", 8) or 8),
+                external_downloader=cfg.get("external_downloader", "auto"),
+                progress=progress, live_progress=live_progress)
+            paths = [x["path"] for x in result]
+            with _LOCK:
+                manual = STATE["manual"]
+                manual.update({"working": False, "source_videos": paths,
+                               "source_done": len(paths), "source_total": len(urls),
+                               "source_status": "Đã tải %d/%d video" %
+                               (len(paths), len(urls)), "error": "",
+                               "rev": int(manual.get("rev", 0)) + 1})
+            _progress(pct=100, step="Tải video nền xong",
+                      detail="%d file sẵn sàng" % len(paths))
+        except InterruptedError:
+            _mark_manual_cancelled("Đã dừng tải video; các file đã tải vẫn được giữ lại.")
+        except Exception as exc:
+            _log("Tải video nền lỗi: %s" % exc, "err")
+            with _LOCK:
+                manual = STATE["manual"]
+                manual.update({"working": False, "source_status": "Tải lỗi",
+                               "error": str(exc)[:300],
+                               "rev": int(manual.get("rev", 0)) + 1})
+            _progress(pct=100, step="Tải video nền lỗi", detail=str(exc)[:160])
+        finally:
+            with _LOCK:
+                STATE["running"] = False
+                STATE["busy"] = ""
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"ok": True, "async": True, "total": len(links)}, 200
 
 
 def api_story_generated_script() -> JsonResult:
@@ -500,20 +1323,140 @@ def api_story_generated_script() -> JsonResult:
     return {"text": text, "path": path, "title": title, "words": words}, 200
 
 
+def api_story_resume_images(b: Dict) -> JsonResult:
+    """Tiếp tục đúng các cảnh thiếu trong manifest rồi bàn giao thẳng sang video."""
+    pack_path = str(b.get("image_pack") or "").strip().strip('"')
+    if not pack_path:
+        return {"error": "Chưa có gói ảnh để tiếp tục."}, 400
+    try:
+        from .. import story_images
+        manifest = story_images.load_pack(pack_path)
+    except Exception as exc:
+        return {"error": "Không đọc được gói ảnh: %s" % exc}, 400
+    scenes = list(manifest.get("scenes") or [])
+    if not scenes:
+        return {"error": "Gói ảnh không có danh sách cảnh."}, 400
+    requested_title = str(b.get("story_title") or "").strip()
+    pack_title = str(manifest.get("title") or "").strip()
+    if (requested_title and pack_title and
+            _story_title_key(requested_title) != _story_title_key(pack_title)):
+        return {"error": ("Không thể tiếp tục ảnh của truyện '%s' cho tiêu đề mới '%s'."
+                          % (pack_title, requested_title))}, 409
+    script_path = str(b.get("txt_path") or manifest.get("script_path") or "")
+    if not script_path or not os.path.isfile(script_path):
+        return {"error": "Không thấy KICH_BAN_DOC.txt của gói ảnh."}, 400
+
+    with _LOCK:
+        if STATE["running"] or STATE["busy"]:
+            return {"error": "Đang bận: " +
+                    (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
+        STATE["running"] = True
+        STATE["busy"] = "Đang tiếp tục tạo các ảnh còn thiếu…"
+        manual = STATE["manual"]
+        manual.update({
+            "working": True,
+            "status": "Tiếp tục tạo ảnh từ cảnh còn thiếu…",
+            "error": "", "output_path": "",
+            "script_path": os.path.abspath(script_path),
+            "script_title": str(manifest.get("title") or b.get("name") or ""),
+            "image_pack_path": str(manifest.get("manifest_path") or pack_path),
+            "image_scene_count": len(scenes),
+            "image_ready_count": int(manifest.get("ready_count", 0) or 0),
+            "image_prompt_ready": False,
+            "rev": int(manual.get("rev", 0)) + 1,
+        })
+    _progress(pct=36, step="Tiếp tục tạo ảnh",
+              detail="Giữ ảnh đã có, bắt đầu từ cảnh còn thiếu")
+
+    def _work(payload=dict(b), current=manifest,
+              source_script=os.path.abspath(script_path)):
+        handed_off = False
+        try:
+            cfg = _load_cfg()
+            payload["auto_images"] = True
+            payload["image_pack"] = str(current.get("manifest_path") or pack_path)
+            payload["anh"] = []
+            result = {
+                "title": str(current.get("title") or payload.get("name") or "Truyện"),
+                "script_path": source_script,
+                "design_path": str(current.get("design_path") or ""),
+            }
+            images, resumed_pack = _prepare_generated_story_images(
+                result, payload, cfg)
+            _raise_if_cancelled()
+            if not images:
+                with _LOCK:
+                    manual = STATE["manual"]
+                    ready = int(manual.get("image_ready_count", 0) or 0)
+                    total = int(manual.get("image_scene_count", 0) or 0)
+                    manual.update({
+                        "working": False,
+                        "status": "Tạo ảnh tạm dừng ở %d/%d; bấm Tiếp tục để thử lại"
+                                  % (ready, total),
+                        "error": "",
+                        "rev": int(manual.get("rev", 0)) + 1,
+                    })
+                _progress(pct=100, step="Tạo ảnh tạm dừng",
+                          detail="Ảnh đã tạo được giữ nguyên")
+                return
+
+            with _LOCK:
+                STATE["running"] = False
+                STATE["busy"] = ""
+            video_payload = dict(payload)
+            video_payload.pop("text", None)
+            video_payload["txt_path"] = source_script
+            video_payload["name"] = str(payload.get("name") or result["title"])
+            video_payload["anh"] = images
+            video_payload["image_pack"] = resumed_pack
+            video_payload["character_context_path"] = result.get("design_path") or ""
+            video_payload["_progress_start"] = 48
+            video_payload["_handoff"] = True
+            response, code = api_manual_run_all(video_payload)
+            if code != 200:
+                raise RuntimeError(response.get("error") or
+                                   "Không khởi động được bước dựng video.")
+            handed_off = True
+            _log("Đã tạo đủ ảnh còn thiếu; tiếp tục giọng đọc và dựng video.", "ok")
+        except InterruptedError:
+            _mark_manual_cancelled("Ảnh đã tạo xong vẫn được giữ để tiếp tục sau.")
+        except Exception as exc:
+            _log("Tiếp tục tạo ảnh lỗi: %s" % exc, "err")
+            with _LOCK:
+                manual = STATE["manual"]
+                manual.update({"working": False, "status": "Tiếp tục tạo ảnh lỗi",
+                               "error": str(exc)[:300],
+                               "rev": int(manual.get("rev", 0)) + 1})
+            _progress(pct=100, step="Tiếp tục tạo ảnh lỗi",
+                      detail=str(exc)[:160])
+        finally:
+            if not handed_off:
+                with _LOCK:
+                    STATE["running"] = False
+                    STATE["busy"] = ""
+
+    threading.Thread(target=_work, daemon=True).start()
+    return {"ok": True, "async": True,
+            "ready_count": int(manifest.get("ready_count", 0) or 0),
+            "scene_count": len(scenes)}, 200
+
+
 def api_story_generate_and_run(b: Dict) -> JsonResult:
     """Một nút: tiêu đề -> KICH_BAN_DOC.txt -> TTS/nhạc/sub/video."""
     title = str(b.get("story_title") or b.get("title") or "").strip()
     if not title:
         return {"error": "Hãy nhập tiêu đề truyện cần viết."}, 400
-    anh = b.get("anh")
-    if isinstance(anh, str):
-        anh = [x for x in re.split(r"[\r\n]+", anh) if x.strip()]
-    if not isinstance(anh, list) or not anh:
-        return {"error": "Hãy thêm ảnh trước khi chạy trọn quy trình."}, 400
+    payload, anh, stale_pack_title = _generated_story_image_inputs(b, title)
+    if stale_pack_title:
+        _log("Tiêu đề mới '%s': không dùng lại ảnh của '%s'; sẽ tạo gói ảnh mới."
+             % (title, stale_pack_title), "info")
     with _LOCK:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " + (STATE["busy"] or "đang xử lý")}, 409
         _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
         STATE["busy"] = "Đang tạo kịch bản từ tiêu đề…"
         manual = STATE["manual"]
@@ -522,12 +1465,17 @@ def api_story_generate_and_run(b: Dict) -> JsonResult:
             "error": "", "output_path": "", "script_path": "",
             "script_title": title, "script_words": 0,
             "recommended_voice": "", "voice_analysis": {},
-            "voice_recommendations": [],
+            "voice_recommendations": [], "voice_cast": [],
+            "voice_assignment_coverage": 0.0, "voice_cast_path": "",
+            "image_pack_path": "", "image_prompt_path": "",
+            "image_provider_url": "", "image_scene_count": 0,
+            "image_ready_count": 0, "image_prompt_ready": False,
+            "image_generation_status": "",
             "rev": int(manual.get("rev", 0)) + 1,
         })
     _progress(pct=2, step="Tạo kịch bản", detail="Mở công cụ viết truyện")
 
-    def _work(payload=dict(b), imgs=list(anh), source_title=title):
+    def _work(payload=dict(payload), imgs=list(anh), source_title=title):
         handed_off = False
         try:
             from .. import story_writer
@@ -540,7 +1488,10 @@ def api_story_generate_and_run(b: Dict) -> JsonResult:
 
             result = story_writer.generate(
                 source_title, cfg, log=_log, progress=_writer_progress,
-                cancel_event=_CANCEL_EVENT)
+                cancel_event=_CANCEL_EVENT,
+                cta=(payload.get("cta") if isinstance(payload.get("cta"), dict)
+                     else None))
+            _raise_if_cancelled()
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({
@@ -569,24 +1520,54 @@ def api_story_generate_and_run(b: Dict) -> JsonResult:
                     "Kịch bản đã được lưu nhưng chưa dựng video để tránh tốn TTS: %s. "
                     "Xem 98_kiem_tra_tu_dong.txt trong %s."
                     % (", ".join(quality_issues), result["folder"]))
+            source_videos = _story_video_inputs(payload)
+            auto_img = bool(payload.get("auto_images", True))
+            if not imgs and not source_videos:
+                if auto_img:
+                    imgs, image_pack = _prepare_generated_story_images(
+                        result, payload, cfg)
+                    _raise_if_cancelled()
+                    payload["image_pack"] = image_pack
+                    if not imgs:
+                        ready = int((STATE.get("manual") or {}).get(
+                            "image_ready_count", 0) or 0)
+                        total = int((STATE.get("manual") or {}).get(
+                            "image_scene_count", 0) or 0)
+                        with _LOCK:
+                            manual = STATE["manual"]
+                            manual.update({
+                                "working": False,
+                                "status": ("Tạo ảnh tạm dừng ở %d/%d; chờ bổ sung ảnh "
+                                           "hoặc bấm Tiếp tục"
+                                           % (ready, total)),
+                                "error": "",
+                                "rev": int(manual.get("rev", 0)) + 1,
+                            })
+                        _progress(pct=100, step="Đang chờ ảnh",
+                                  detail="Ảnh đã lưu; bấm Tiếp tục để tạo các cảnh còn thiếu")
+                        _log("Tạo ảnh đã tạm dừng ở %d/%d. Ảnh đã có vẫn được giữ; "
+                             "bấm Tiếp tục để chạy từ cảnh còn thiếu." % (ready, total), "warn")
+                        return
+                else:
+                    _log("Đã tắt tạo ảnh AI: bỏ qua bước tạo ảnh, chuyển sang tạo giọng đọc.", "info")
             auto_voice_id = ""
             voice_result = None
-            if bool(payload.get("voice_auto", False)):
-                from .. import story_voice, tts as tts_mod
+            if bool(payload.get("voice_auto", False)) or bool(payload.get("multi_voice", False)):
                 script_text = _doc_file_van_ban(result["script_path"])
                 engine = str(payload.get("engine") or
                              (cfg.get("tts") or {}).get("engine") or "capcut").lower()
-                catalog = tts_mod.list_voices(engine)
-                if catalog:
-                    voice_result = story_voice.recommend_voices(
-                        script_text, catalog, engine=engine, limit=5)
-                    recs = voice_result.get("recommendations") or []
-                    if recs:
-                        auto_voice_id = str(recs[0]["id"])
-                        _log("Phân tích truyện đề xuất giọng %s: %s"
-                             % (recs[0]["name"], "; ".join(recs[0]["reasons"])), "ok")
-                else:
-                    _log("Không có catalog giọng để tự đề xuất; giữ giọng đã chọn.", "warn")
+                plan_payload = dict(payload)
+                plan_payload["character_context_path"] = result.get("design_path") or ""
+                voice_result = _story_voice_plan(
+                    script_text, plan_payload, cfg, engine,
+                    str(payload.get("voice") or ""), str(payload.get("pitch") or "+0Hz"))
+                if voice_result:
+                    auto_voice_id = str((voice_result.get("narrator") or {}).get("id") or "")
+                    narrator = voice_result.get("narrator") or {}
+                    _log("Giọng kể tự chọn: %s. Đã gán %d nhân vật, phủ %.1f%% lượt thoại."
+                         % (narrator.get("name") or auto_voice_id,
+                            len(voice_result.get("cast") or []),
+                            float(voice_result.get("assignment_coverage") or 0)), "ok")
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({
@@ -594,26 +1575,36 @@ def api_story_generate_and_run(b: Dict) -> JsonResult:
                     "recommended_voice": auto_voice_id,
                     "voice_analysis": (voice_result or {}).get("analysis") or {},
                     "voice_recommendations": (voice_result or {}).get("recommendations") or [],
+                    "voice_cast": (voice_result or {}).get("cast") or [],
+                    "voice_assignment_coverage": float(
+                        (voice_result or {}).get("assignment_coverage") or 0),
                     "rev": int(manual.get("rev", 0)) + 1,
                 })
                 # Bàn giao khoá cho api_manual_run_all ngay trong thread này.
                 STATE["running"] = False
                 STATE["busy"] = ""
-            _progress(pct=35, step="Kịch bản hoàn tất",
+            _progress(pct=48, step="Kịch bản và hình ảnh hoàn tất",
                       detail="%s từ · đang tạo giọng đọc" % result["words"])
             video_payload = dict(payload)
             video_payload.pop("text", None)
             video_payload["txt_path"] = result["script_path"]
             video_payload["name"] = str(payload.get("name") or result["title"])
             video_payload["anh"] = imgs
+            video_payload["video_sources"] = source_videos
+            video_payload["character_context_path"] = result.get("design_path") or ""
             if auto_voice_id:
                 video_payload["voice"] = auto_voice_id
-            video_payload["_progress_start"] = 35
+            video_payload["_progress_start"] = 48
+            video_payload["_handoff"] = True
+            _raise_if_cancelled()
             response, code = api_manual_run_all(video_payload)
             if code != 200:
                 raise RuntimeError(response.get("error") or "Không khởi động được bước dựng video.")
             handed_off = True
             _log("Đã tự nạp KICH_BAN_DOC.txt vào pipeline video kể chuyện.", "ok")
+        except InterruptedError:
+            _mark_manual_cancelled(
+                "Đã giữ lại kịch bản, prompt, ảnh và các phần đã hoàn thành.")
         except Exception as exc:
             _log("Tạo kịch bản và video lỗi: %s" % exc, "err")
             with _LOCK:
@@ -645,11 +1636,9 @@ def api_manual_run_all(b: Dict) -> JsonResult:
     text, err = _lay_van_ban_tu_body(b)
     if err:
         return err
-    anh = b.get("anh")
-    if isinstance(anh, str):
-        anh = [x for x in re.split(r"[\r\n]+", anh) if x.strip()]
-    if not isinstance(anh, list) or not anh:
-        return {"error": "Hãy chọn ảnh hoặc thư mục ảnh."}, 400
+    anh = _story_image_inputs(b)
+    video_sources = _story_video_inputs(b)
+    audio_only = not anh and not video_sources
     try:
         progress_start = max(0.0, min(95.0, float(b.get("_progress_start", 0) or 0)))
     except (TypeError, ValueError):
@@ -663,19 +1652,33 @@ def api_manual_run_all(b: Dict) -> JsonResult:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " +
                     (STATE["busy"] or "đang xử lý")}, 409
+        if b.get("_handoff") and _CANCEL_EVENT.is_set():
+            return {"error": "Đã dừng tác vụ theo yêu cầu."}, 409
         _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
         STATE["busy"] = "Đang làm video kể chuyện…"
         manual = STATE["manual"]
         manual.update({"working": True,
                        "status": "Bước 1/4: tổng hợp giọng đọc…",
                        "error": "", "output_path": "",
+                       "image_pack_path": str(b.get("image_pack") or ""),
+                       "image_ready_count": len(anh),
+                       "image_prompt_ready": False,
+                       "image_generation_status": (
+                           "Đã nhận video nguồn; bắt đầu dựng video"
+                           if video_sources else "Đã nhận ảnh; bắt đầu dựng video" if anh else "Đang tạo giọng đọc"),
+                       "source_videos": video_sources,
+                       "voice_cast": [], "voice_assignment_coverage": 0.0,
+                       "voice_cast_path": "",
                        "rev": int(manual.get("rev", 0)) + 1})
     _story_progress(pct=3, step="Video kể chuyện", detail="Chuẩn bị văn bản")
 
-    def _work(payload=dict(b), source_text=text, imgs=list(anh)):
+    def _work(payload=dict(b), source_text=text, imgs=list(anh),
+              source_videos=list(video_sources)):
         try:
             from .. import tts as tts_mod, nhac_nen as nn, slideshow as ss
+            source_text = _ensure_story_ctas(source_text, payload)
             cfg = _load_cfg()
             tc = cfg.get("tts", {}) or {}
             nc = cfg.get("nhac_nen", {}) or {}
@@ -699,9 +1702,23 @@ def api_manual_run_all(b: Dict) -> JsonResult:
             title = _safe_path_stem(payload.get("name") or source_text[:50],
                                     fallback="video_ke_chuyen", limit=70)
             stamp = time.strftime("%Y%m%d_%H%M%S")
-            out_dir = os.path.join(HERE, "output", "manual_video")
-            workdir = os.path.join(out_dir, "_tmp", f"{title}_{stamp}")
+            out_dir = _story_output_dir(title)
+            workdir, reusable_clips = _story_tts_workdir(
+                out_dir, title, stamp, engine)
             os.makedirs(workdir, exist_ok=True)
+            if reusable_clips:
+                _log("[Kể chuyện] Tiếp tục từ %d đoạn CapCut đã tạo ở lượt trước."
+                     % reusable_clips, "ok")
+
+            voice_plan = _story_voice_plan(
+                source_text, payload, cfg, engine, voice, pitch)
+            if voice_plan:
+                voice = str((voice_plan.get("narrator") or {}).get("id") or voice)
+                cast_count = len(voice_plan.get("cast") or [])
+                if cast_count:
+                    _log("[Kể chuyện] Dàn giọng: 1 người kể + %d nhân vật; "
+                         "nhận diện chắc %.1f%% lượt thoại."
+                         % (cast_count, float(voice_plan.get("assignment_coverage") or 0)), "ok")
 
             # ---- 1/4: giọng đọc ----
             _log(f"[Kể chuyện] 1/4 giọng đọc: engine={engine}, voice={voice}, "
@@ -716,21 +1733,32 @@ def api_manual_run_all(b: Dict) -> JsonResult:
                 retry_base_delay=float(tc.get("retry_delay", 1.2) or 1.2),
                 vieneu_options=tc.get("vieneu_options"),
                 capcut_options=tc.get("capcut_options"),
-                max_chunk_chars=240)   # đoạn ngắn -> mốc phụ đề mịn
+                max_chunk_chars=240,   # đoạn ngắn -> mốc phụ đề mịn
+                utterances=(voice_plan or {}).get("utterances"),
+                **_cta_tts_options(payload),
+                cancel_event=_CANCEL_EVENT)
+            _raise_if_cancelled()
             srt_path = os.path.join(out_dir, f"{title}_{stamp}.srt")
             srt_utils.save_srt_file(
                 srt_path, _segments_tu_timeline(tts_res.get("segments")))
             audio = tts_res["path"]
+            cast_path = _save_voice_cast(
+                os.path.join(out_dir, f"{title}_{stamp}.giong.json"), voice_plan)
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({"audio_path": audio,
                                "audio_duration": tts_res["duration"],
                                "srt_path": srt_path,
+                               "voice_cast": (voice_plan or {}).get("cast") or [],
+                               "voice_assignment_coverage": float(
+                                   (voice_plan or {}).get("assignment_coverage") or 0),
+                               "voice_cast_path": cast_path,
                                "status": "Bước 2/4: nhạc nền…",
                                "rev": int(manual.get("rev", 0)) + 1})
 
             # ---- 2/4: nhạc nền (tuỳ chọn) ----
             if nhac.get("enabled", True):
+                _raise_if_cancelled()
                 _story_progress(pct=35, step="Video kể chuyện", detail="2/4 Trộn nhạc nền")
                 if not str(nhac.get("bai") or "") and nc.get("tu_dong_tai", True):
                     cats = nc.get("danh_muc")
@@ -745,25 +1773,104 @@ def api_manual_run_all(b: Dict) -> JsonResult:
                     duck_ratio=float(nhac.get("duck_ratio", nc.get("duck_ratio", 8))),
                     fade=float(nhac.get("fade", nc.get("fade", 2.0))))
                 audio = mix["path"]
+                # Luôn công bố track cuối (đã có nhạc) cho nút dựng lại video.
+                # Nếu giữ đường dẫn giong_doc.mp3 ở STATE, lượt "random video +
+                # xuất MP4" sau đó sẽ vô tình làm mất nhạc nền.
+                with _LOCK:
+                    manual = STATE["manual"]
+                    manual.update({"audio_path": audio,
+                                   "audio_duration": float(
+                                       mix.get("duration") or tts_res["duration"]),
+                                   "rev": int(manual.get("rev", 0)) + 1})
 
             # ---- 3/4: phụ đề cứng (tuỳ chọn) ----
             ass_path = None
+            _raise_if_cancelled()
             if sub_cfg.get("enabled", True):
                 _story_progress(pct=45, step="Video kể chuyện", detail="3/4 Dựng phụ đề")
                 ass_path = _ass_tu_srt(srt_path, workdir, w, h, sub_cfg.get("style"))
 
-            # ---- 4/4: dựng video từ ảnh ----
+            # ---- Nếu chưa có ảnh/video: kết thúc ở audio để người dùng tải lên sau ----
+            if not imgs and not source_videos:
+                dur_str = "%dp%02ds" % (int(tts_res["duration"] // 60), int(tts_res["duration"] % 60))
+                with _LOCK:
+                    manual = STATE["manual"]
+                    manual.update({"working": False,
+                                   "status": f"Đã tạo xong audio ({dur_str})! Hãy thêm video nguồn (cột trái) rồi bấm Xuất MP4.",
+                                   "audio_path": audio,
+                                   "audio_duration": tts_res["duration"],
+                                   "srt_path": srt_path,
+                                   "error": "",
+                                   "rev": int(manual.get("rev", 0)) + 1})
+                _story_progress(pct=100, step="Audio sẵn sàng",
+                                detail=f"Thời lượng audio: {dur_str} — Hãy chọn video nguồn để ghép")
+                _log(f"[Kể chuyện] Đã tạo xong giọng đọc ({dur_str}) và phụ đề. Thêm video nguồn và bấm Xuất MP4 để hoàn thành.", "ok")
+                return
+
+            # ---- 4/4: dựng video từ ảnh hoặc video nguồn ----
             with _LOCK:
                 manual = STATE["manual"]
-                manual.update({"status": "Bước 4/4: dựng video từ ảnh…",
+                manual.update({"status": ("Bước 4/4: dựng video từ video nguồn…"
+                                            if source_videos else
+                                            "Bước 4/4: dựng video từ ảnh…"),
                                "rev": int(manual.get("rev", 0)) + 1})
-            result = ss.tao_video_tu_anh(
-                imgs, audio, os.path.join(out_dir, f"{title}_{stamp}.mp4"),
-                workdir=workdir, w=w, h=h, fps=fps, kieu=kieu,
-                ass_path=ass_path,
-                progress=lambda pct, detail: _story_progress(
-                    pct=50 + pct * 0.5, step="Video kể chuyện",
-                    detail="4/4 " + str(detail)))
+            out_path = os.path.join(out_dir, f"{title}_{stamp}.mp4")
+            if source_videos:
+                clip_min = float(payload.get("source_clip_min_seconds", 300) or 300)
+                clip_max = float(payload.get(
+                    "source_clip_max_seconds",
+                    payload.get("source_clip_seconds", 600)) or 600)
+                random_pick = bool(payload.get("source_random", True))
+                _log(
+                    "[Kể chuyện] 4/4 %s %d mục video nguồn cho đủ %.1f phút "
+                    "audio (mỗi đoạn %.1f–%.1f phút)."
+                    % ("random" if random_pick else "xếp tuần tự",
+                       len(source_videos), float(tts_res["duration"]) / 60.0,
+                       clip_min / 60.0, clip_max / 60.0),
+                    "step")
+
+                def _video_progress(pct, detail):
+                    _story_progress(pct=50 + pct * 0.5,
+                                    step="Video kể chuyện",
+                                    detail="4/4 " + str(detail))
+                    if (float(pct) <= 3.0 or
+                            str(detail).startswith("FFmpeg vẫn đang ghép")):
+                        _log("[Kể chuyện] " + str(detail), "step")
+
+                result = ss.tao_video_tu_video(
+                    source_videos, audio, out_path, workdir=workdir, w=w, h=h,
+                    fps=fps, hieu_ung=str(payload.get("source_effect") or "tinh"),
+                    ass_path=ass_path,
+                    logo=(payload.get("logo") if isinstance(payload.get("logo"), dict)
+                          else None),
+                    character=(payload.get("character") if isinstance(payload.get("character"), dict)
+                               else None),
+                    source_cover=str(payload.get("source_cover") or "none"),
+                    min_seconds=clip_min,
+                    max_seconds=clip_max,
+                    random_pick=random_pick,
+                    random_seed=int(payload.get("source_random_seed", 0) or 0) or None,
+                    transform=(payload.get("source_transform")
+                               if isinstance(payload.get("source_transform"), dict)
+                               else None),
+                    blur_regions=(payload.get("regions")
+                                  if isinstance(payload.get("regions"), list)
+                                  else None),
+                    blur_bottom_ratio=float(payload.get("blur_bottom_ratio", 0) or 0),
+                    progress=_video_progress)
+            else:
+                render_imgs, keep_repeats = _story_slideshow_images(
+                    payload, imgs, ffprobe_duration(audio))
+                result = ss.tao_video_tu_anh(
+                    render_imgs, audio, out_path, workdir=workdir, w=w, h=h, fps=fps,
+                    kieu=kieu, ass_path=ass_path,
+                    logo=(payload.get("logo") if isinstance(payload.get("logo"), dict)
+                          else None), giu_canh_lap=keep_repeats,
+                    character=(payload.get("character") if isinstance(payload.get("character"), dict)
+                               else None),
+                    progress=lambda pct, detail: _story_progress(
+                        pct=50 + pct * 0.5, step="Video kể chuyện",
+                        detail="4/4 " + str(detail)))
             with _LOCK:
                 manual = STATE["manual"]
                 manual.update({"working": False,
@@ -773,6 +1880,9 @@ def api_manual_run_all(b: Dict) -> JsonResult:
             _story_progress(pct=100, step="Video kể chuyện xong",
                             detail=os.path.basename(result["path"]))
             _log(f"[Kể chuyện] Xong: {result['path']}", "ok")
+        except InterruptedError:
+            _mark_manual_cancelled(
+                "Đã giữ lại các đoạn giọng, audio, ảnh và phụ đề đã hoàn thành.")
         except Exception as e:
             _log(f"Làm video kể chuyện lỗi: {e}", "err")
             with _LOCK:
@@ -788,6 +1898,51 @@ def api_manual_run_all(b: Dict) -> JsonResult:
 
     threading.Thread(target=_work, daemon=True).start()
     return {"ok": True, "async": True}, 200
+
+
+def api_story_video_info(b: Dict) -> JsonResult:
+    """Trả về thông tin các video nguồn: duration, resolution."""
+    try:
+        from ..video import ffprobe_duration
+        from ..downloader import ffprobe_video_size
+        paths = b.get("paths", [])
+        if isinstance(paths, str):
+            paths = [paths]
+        from ..slideshow import liet_ke_video
+        expanded = liet_ke_video(paths)
+        results = []
+        total_duration = 0.0
+        for p in expanded:
+            p = str(p).strip().strip('"')
+            if not p or not os.path.isfile(p):
+                results.append({"path": p, "error": "File không tồn tại"})
+                continue
+            try:
+                dur = ffprobe_duration(p)
+                size = ffprobe_video_size(p)
+                total_duration += dur
+                results.append({
+                    "path": p,
+                    "name": os.path.basename(p),
+                    "duration": dur,
+                    "width": size[0] if size else 0,
+                    "height": size[1] if size else 0,
+                })
+            except Exception as e:
+                results.append({"path": p, "error": str(e)[:200]})
+        audio_dur = 0.0
+        with _LOCK:
+            audio_dur = float((STATE.get("manual") or {}).get("audio_duration") or 0)
+        return {
+            "videos": results,
+            "paths": expanded,
+            "total_video_duration": total_duration,
+            "audio_duration": audio_dur,
+            "trim_needed": total_duration > audio_dur > 0,
+            "trim_seconds": max(0, total_duration - audio_dur) if audio_dur > 0 else 0,
+        }, 200
+    except Exception as e:
+        return {"error": str(e)[:300]}, 500
 
 
 def api_manual_mux(b: Dict) -> JsonResult:
@@ -807,6 +1962,8 @@ def api_manual_mux(b: Dict) -> JsonResult:
         if STATE["running"] or STATE["busy"]:
             return {"error": "Đang bận: " +
                     (STATE["busy"] or "đang xử lý")}, 409
+        _CANCEL_EVENT.clear()
+        STATE["cancel"] = False
         STATE["running"] = True
         STATE["busy"] = "Đang ghép audio vào video…"
         manual = STATE["manual"]
@@ -869,6 +2026,8 @@ def api_manual_mux(b: Dict) -> JsonResult:
             _progress(pct=100, step="Ghép audio hoàn tất",
                       detail=os.path.basename(final))
             _log(f"Đã ghép audio vào video: {final}", "ok")
+        except InterruptedError:
+            _mark_manual_cancelled("Đã dừng ghép audio vào video.")
         except Exception as e:
             _log(f"Ghép audio vào video lỗi: {e}", "err")
             with _LOCK:
