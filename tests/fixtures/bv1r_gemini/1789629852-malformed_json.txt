@@ -1,0 +1,62 @@
+{
+"translated_sentences": [
+{
+"sentence_id": "s1",
+"source_ids": [81],
+"text_vi": "loạng choạng lùi lại phía sau.",
+"speaker": null
+},
+{
+"sentence_id": "s2",
+"source_ids": [82],
+"text_vi": ""Mày giở trò quỷ gì thế?"",
+"speaker": null
+},
+{
+"sentence_id": "s3",
+"source_ids": [83, 84],
+"text_vi": ""Đã thức tỉnh rồi mà vẫn không đánh lại mày, thì chẳng phải tao uổng công cướp thận của mày rồi sao?"",
+"speaker": null
+},
+{
+"sentence_id": "s4",
+"source_ids": [85, 86],
+"text_vi": "Tôi giơ tay ghim chặt Tô Lâm lên tường, tay còn lại đem đá thức tỉnh,",
+"speaker": null
+}
+],
+"new_entities": [],
+"updated_summary": "Tô Lâm ôm cổ hoảng loạn lùi lại khi thấy vết{
+"translated_sentences": [
+{
+"sentence_id": "s1",
+"source_ids": [81],
+"text_vi": "loạng choạng lùi lại phía sau.",
+"speaker": null
+},
+{
+"sentence_id": "s2",
+"source_ids": [82],
+"text_vi": ""Mày giở trò quỷ gì thế?"",
+"speaker": null
+},
+{
+"sentence_id": "s3",
+"source_ids": [83, 84],
+"text_vi": ""Đã thức tỉnh rồi mà vẫn không đánh lại mày, thì chẳng phải anh uổng công lấy thận của mày rồi sao?"",
+"speaker": null
+},
+{
+"sentence_id": "s4",
+"source_ids": [85, 86],
+"text_vi": "Tôi giơ tay ghim chặt Tô Lâm lên tường, tay kia cầm viên đá thức tỉnh,",
+"speaker": null
+}
+],
+"new_entities": [],
+"updated_summary": "Tô Lâm hoảng loạn lùi lại khi thấy vết thương bị phản ứng ngược. Tô Du lập tức chế ngự, ép Tô Lâm vào tường và chuẩn bị ấn viên đá thức tỉnh vào tay cô bé.",
+"warnings": [
+"Cue 85: ASR nhận diện nhầm '苏宁' thành tên em gái, đã chuẩn hóa theo nhân vật '苏林' (Tô Lâm).",
+"Cue 86: ASR nhận diện sai '觉醒时' thay vì '觉醒石' (đá thức tỉnh)."
+]
+}

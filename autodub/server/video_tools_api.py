@@ -109,7 +109,9 @@ def api_search_videos(b: Dict) -> JsonResult:
     except (TypeError, ValueError):
         limit = 10
     provider = str(b.get("provider") or "all").strip().lower()
-    if provider not in {"all", "bilibili", "youtube"}:
+    from ..download_site import VIDEO_SEARCH_PROVIDERS, normalise_search_provider
+    provider = normalise_search_provider(provider, default="all")
+    if provider not in VIDEO_SEARCH_PROVIDERS:
         provider = "all"
     with _LOCK:
         if STATE["video_tools"].get("working"):
@@ -170,7 +172,8 @@ def api_download_videos(b: Dict) -> JsonResult:
                 concurrent_fragments=int(cfg.get("concurrent_fragments", 8) or 8),
                 external_downloader=cfg.get("external_downloader", "auto"),
                 progress=progress, live_progress=live_progress,
-                max_workers=max(1, min(3, int(payload.get("workers", 3) or 3))))
+                max_workers=max(1, min(3, int(payload.get("workers", 3) or 3))),
+                proxy=cfg.get("proxy"))
             files = [os.path.abspath(row["path"]) for row in rows
                      if row.get("path") and os.path.isfile(row["path"])]
             if not files:

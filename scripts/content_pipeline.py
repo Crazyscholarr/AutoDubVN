@@ -44,7 +44,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--table", default="", help="Tên bảng SQLite (bỏ trống để tự dò)")
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--provider", default="auto",
-                   help="auto|nvidia|zenmux|gemini|heuristic")
+                   help="auto|tokenharbor|nvidia|zenmux|gemini|heuristic")
     p.add_argument("--concurrency", type=int, default=0)
     p.add_argument("--all", action="store_true", help="Xử lý cả mục chưa tick")
     p.add_argument("--output-dir", default="")

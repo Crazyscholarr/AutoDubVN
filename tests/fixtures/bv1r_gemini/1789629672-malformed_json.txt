@@ -1,0 +1,39 @@
+{
+"translated_sentences": [
+{
+"sentence_id": "s1",
+"source_ids": [11],
+"text_vi": "đập cái bẹp lên mặt quầy.",{
+"translated_sentences": [
+{
+"sentence_id": "s1",
+"source_ids": [11],
+"text_vi": "vật thể đập bốp một cái lên quầy.",
+"speaker": null
+},
+{
+"sentence_id": "s2",
+"source_ids": [12],
+"text_vi": "Ông chủ, thận tươi mới cắt bao nhiêu tiền?",
+"speaker": null
+},
+{
+"sentence_id": "s3",
+"source_ids": [13],
+"text_vi": "Thu, mười... một trăm ngàn tệ thu.",
+"speaker": null
+},
+{
+"sentence_id": "s4",
+"source_ids": [14, 15],
+"text_vi": "Nhưng mà chàng trai này, hôm qua tôi mới buột miệng bảo thận bán được tiền thôi mà.",
+"speaker": null
+}
+],
+"new_entities": [],
+"updated_summary": "Nhân vật chính đem quả thận đến chợ đen bán, chủ tiệm đồng ý thu mua với giá một trăm ngàn tệ và bất ngờ trước hành động dứt khoát này.",
+"warnings": [
+"Cue 11 kết nối ngữ nghĩa với cue 10 ở context_before ('抬手将一团温热的' + '物件趴的拍在柜台上').",
+"Cue 13 có hiện tượng nói lắp/ngắt quãng ('十十万块' được dịch là 'mười... một trăm ngàn tệ')."
+]
+}

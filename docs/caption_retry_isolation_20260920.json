@@ -1,0 +1,275 @@
+{
+  "focus": [
+    14052.2,
+    14055.92
+  ],
+  "outside_source_unchanged": true,
+  "outside_marks_unchanged": true,
+  "lost_remote_marks_in_regression": 533,
+  "baseline": {
+    "source_count": 9553,
+    "mark_count": 77349,
+    "packed_count": 9790,
+    "blocked_rows": 1,
+    "ui_gaps": [
+      {
+        "start": 14054.35,
+        "end": 14054.9,
+        "reason": "missing_speech_marks",
+        "play_start": 14052.85,
+        "play_end": 14055.9
+      }
+    ]
+  },
+  "regression": {
+    "source_count": 9551,
+    "mark_count": 76815,
+    "packed_count": 9729,
+    "blocked_rows": 63,
+    "ui_gaps": [
+      {
+        "start": 203.05,
+        "end": 206.29,
+        "reason": "missing_speech_marks",
+        "play_start": 201.55,
+        "play_end": 207.29
+      },
+      {
+        "start": 327.79,
+        "end": 330.36,
+        "reason": "missing_speech_marks",
+        "play_start": 326.29,
+        "play_end": 331.36
+      },
+      {
+        "start": 888.79,
+        "end": 891.03,
+        "reason": "missing_speech_marks",
+        "play_start": 887.29,
+        "play_end": 892.03
+      },
+      {
+        "start": 963.108,
+        "end": 965.98,
+        "reason": "missing_speech_marks",
+        "play_start": 961.608,
+        "play_end": 966.98
+      },
+      {
+        "start": 1658.66,
+        "end": 1662.86,
+        "reason": "missing_speech_marks",
+        "play_start": 1657.16,
+        "play_end": 1663.86
+      },
+      {
+        "start": 2596.5,
+        "end": 2599.29,
+        "reason": "missing_speech_marks",
+        "play_start": 2595.0,
+        "play_end": 2600.29
+      },
+      {
+        "start": 3209.02,
+        "end": 3212.99,
+        "reason": "missing_speech_marks",
+        "play_start": 3207.52,
+        "play_end": 3213.99
+      },
+      {
+        "start": 6401.93,
+        "end": 6404.41,
+        "reason": "missing_speech_marks",
+        "play_start": 6400.43,
+        "play_end": 6405.41
+      },
+      {
+        "start": 8286.28,
+        "end": 8289.06,
+        "reason": "missing_speech_marks",
+        "play_start": 8284.78,
+        "play_end": 8290.06
+      },
+      {
+        "start": 8850.71,
+        "end": 8852.85,
+        "reason": "missing_speech_marks",
+        "play_start": 8849.21,
+        "play_end": 8853.85
+      },
+      {
+        "start": 9168.952,
+        "end": 9171.09,
+        "reason": "missing_speech_marks",
+        "play_start": 9167.452,
+        "play_end": 9172.09
+      },
+      {
+        "start": 9259.23,
+        "end": 9262.35,
+        "reason": "missing_speech_marks",
+        "play_start": 9257.73,
+        "play_end": 9263.35
+      },
+      {
+        "start": 9370.248,
+        "end": 9374.33,
+        "reason": "missing_speech_marks",
+        "play_start": 9368.748,
+        "play_end": 9375.33
+      },
+      {
+        "start": 9456.029,
+        "end": 9458.11,
+        "reason": "missing_speech_marks",
+        "play_start": 9454.529,
+        "play_end": 9459.11
+      },
+      {
+        "start": 10347.19,
+        "end": 10348.4,
+        "reason": "missing_speech_marks",
+        "play_start": 10345.69,
+        "play_end": 10349.4
+      },
+      {
+        "start": 10478.72,
+        "end": 10481.62,
+        "reason": "missing_speech_marks",
+        "play_start": 10477.22,
+        "play_end": 10482.62
+      },
+      {
+        "start": 10522.38,
+        "end": 10525.68,
+        "reason": "missing_speech_marks",
+        "play_start": 10520.88,
+        "play_end": 10526.68
+      },
+      {
+        "start": 10697.82,
+        "end": 10700.12,
+        "reason": "missing_speech_marks",
+        "play_start": 10696.32,
+        "play_end": 10701.12
+      },
+      {
+        "start": 11295.14,
+        "end": 11297.86,
+        "reason": "missing_speech_marks",
+        "play_start": 11293.64,
+        "play_end": 11298.86
+      },
+      {
+        "start": 11299.42,
+        "end": 11302.7,
+        "reason": "missing_speech_marks",
+        "play_start": 11297.92,
+        "play_end": 11303.7
+      },
+      {
+        "start": 11342.31,
+        "end": 11348.92,
+        "reason": "missing_speech_marks",
+        "play_start": 11340.81,
+        "play_end": 11349.92
+      },
+      {
+        "start": 11539.96,
+        "end": 11541.34,
+        "reason": "missing_speech_marks",
+        "play_start": 11538.46,
+        "play_end": 11542.34
+      },
+      {
+        "start": 11636.0,
+        "end": 11638.512,
+        "reason": "missing_speech_marks",
+        "play_start": 11634.5,
+        "play_end": 11639.512
+      },
+      {
+        "start": 11957.08,
+        "end": 11960.222,
+        "reason": "missing_speech_marks",
+        "play_start": 11955.58,
+        "play_end": 11961.222
+      },
+      {
+        "start": 12356.24,
+        "end": 12360.03,
+        "reason": "missing_speech_marks",
+        "play_start": 12354.74,
+        "play_end": 12361.03
+      },
+      {
+        "start": 12792.86,
+        "end": 12796.412,
+        "reason": "missing_speech_marks",
+        "play_start": 12791.36,
+        "play_end": 12797.412
+      },
+      {
+        "start": 13328.36,
+        "end": 13331.02,
+        "reason": "missing_speech_marks",
+        "play_start": 13326.86,
+        "play_end": 13332.02
+      },
+      {
+        "start": 13599.56,
+        "end": 13603.37,
+        "reason": "missing_speech_marks",
+        "play_start": 13598.06,
+        "play_end": 13604.37
+      },
+      {
+        "start": 13795.95,
+        "end": 13797.57,
+        "reason": "missing_speech_marks",
+        "play_start": 13794.45,
+        "play_end": 13798.57
+      },
+      {
+        "start": 13809.33,
+        "end": 13812.06,
+        "reason": "missing_speech_marks",
+        "play_start": 13807.83,
+        "play_end": 13813.06
+      },
+      {
+        "start": 14050.83,
+        "end": 14052.28,
+        "reason": "missing_speech_marks",
+        "play_start": 14049.33,
+        "play_end": 14053.28
+      },
+      {
+        "start": 14055.832,
+        "end": 14058.06,
+        "reason": "missing_speech_marks",
+        "play_start": 14054.332,
+        "play_end": 14059.06
+      }
+    ]
+  },
+  "fixed": {
+    "source_count": 9553,
+    "mark_count": 77348,
+    "packed_count": 9790,
+    "blocked_rows": 1,
+    "ui_gaps": [
+      {
+        "start": 14054.35,
+        "end": 14054.9,
+        "reason": "missing_speech_marks",
+        "play_start": 14052.85,
+        "play_end": 14055.9
+      }
+    ]
+  },
+  "baseline_persisted_ui_count": 1,
+  "regression_persisted_ui_count": 33,
+  "recovered_persisted_ui_count": 1,
+  "restored_files_sha256_verified": true
+}

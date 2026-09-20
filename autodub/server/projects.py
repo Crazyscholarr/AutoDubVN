@@ -14,13 +14,16 @@ from typing import Dict, List, Optional, Tuple
 
 from .. import srt_utils, overlays
 from ..srt_utils import Segment
+from ..semantic import copy_metadata, METADATA_FIELDS
+from ..vi_cues import finalize_spoken_vi_cues
+from ..media_clock import probe_media_clocks
 from ..utils import ffprobe_duration, ffprobe_video_size
 from .state import _LOCK, PROJECTS, _find, _log
 from .helpers import (_safe_path_stem, _output_stem_for_video,
                       _output_dir_for_video, _float_or_none, _fmt_span_time)
 from .config_api import _load_cfg
 
-PROJECT_STATE_KEYS = ("regions", "logo", "sub_style", "options")
+PROJECT_STATE_KEYS = ("regions", "logo", "sub_style", "options", "segments")
 
 
 def _project_state_path(path: str) -> str:
@@ -38,6 +41,9 @@ def _load_project_state(pr: Dict) -> None:
     except Exception as e:
         _log(f"Bỏ qua project state lỗi: {e}", "warn")
         return
+    if not isinstance(saved, dict):
+        _log("Project state phải là object; giữ file gốc để kiểm tra.", "warn")
+        return
     for key in PROJECT_STATE_KEYS:
         if key not in saved:
             continue
@@ -46,7 +52,7 @@ def _load_project_state(pr: Dict) -> None:
             merged = dict(pr.get(key) or {})
             merged.update(val)
             pr[key] = merged
-        elif key == "regions" and isinstance(val, list):
+        elif key in ("regions", "segments") and isinstance(val, list):
             pr[key] = val
         elif key == "logo" and (val is None or isinstance(val, dict)):
             pr[key] = val
@@ -63,6 +69,7 @@ def _save_project_state(pr: Dict) -> None:
         os.replace(tmp, path)
     except Exception as e:
         _log(f"Không lưu được project state: {e}", "warn")
+        raise
 
 
 def default_project(path: str) -> Dict:
@@ -74,10 +81,23 @@ def default_project(path: str) -> Dict:
         cfg = {}
     tc = cfg.get("tts", {}) or {}
     vo = cfg.get("video", {}) or {}
+    clocks = {}
+    try:
+        clocks = probe_media_clocks(path)
+    except Exception:
+        clocks = {}
+    picture = 0.0
+    try:
+        picture = float((clocks or {}).get("picture_duration") or 0.0)
+    except (TypeError, ValueError):
+        picture = 0.0
+    duration = picture if picture > 0.5 else ffprobe_duration(path)
     return {
         "video": path,
         "w": vw, "h": vh,
-        "duration": ffprobe_duration(path),
+        "duration": duration,
+        "picture_duration": duration,
+        "clocks": clocks or {},
         "regions": [],                      # lớp 2: làm mờ / xoá logo
         "logo": None,                       # chèn logo riêng
         "sub_style": dict(overlays.DEFAULT_SUB_STYLE,
@@ -116,11 +136,15 @@ def default_project(path: str) -> Dict:
             "max_overhang_seconds": tc.get("max_overhang_seconds", 0.75),
             "base_rate": tc.get("base_rate", "+0%"),
             "sync_offset_seconds": tc.get("sync_offset_seconds", 0.0),
-            "sync_mode": tc.get("sync_mode", "cascade"),
+            "sync_mode": tc.get("sync_mode", "strict"),
+            "lock_av": tc.get("lock_av", True),
+            "max_start_drift_seconds": tc.get("max_start_drift_seconds", 5.0),
             "trim_overflow": tc.get("trim_overflow", True),
             "trim_enabled": False,
             "trim_start": 0.0,
             "trim_end": None,
+            "auto_dub_thumbnail": (cfg.get("dang_youtube") or {}).get(
+                "auto_dub_thumbnail", False),
         },
     }
 
@@ -137,34 +161,15 @@ def get_project(job_id: int) -> Optional[Dict]:
             return None
         PROJECTS[job_id] = default_project(path)
         _load_project_state(PROJECTS[job_id])
+        from .review import review_for_job, project_review_to_job
+        review = review_for_job(j, PROJECTS[job_id])
+        if review['items'] or review['review_dir']:
+            project_review_to_job(j, review)
         return PROJECTS[job_id]
 
 
 def _segments_from_project(pr: Dict, use_vi: bool = True) -> List[Segment]:
-    out = []
-    for i, s in enumerate(pr.get("segments", []), 1):
-        txt = (s.get("vi") or "") if use_vi else (s.get("src") or "")
-        if not txt.strip():
-            txt = (s.get("src") or "") if use_vi else ""
-        seg = Segment(i, float(s.get("start", 0)), float(s.get("end", 0)),
-                      txt, speaker=s.get("speaker"))
-        if s.get("placed") is not None:
-            try:
-                seg.placed_start = float(s.get("placed"))
-            except (TypeError, ValueError):
-                pass
-        if s.get("voice_dur") is not None:
-            try:
-                seg.voice_duration = float(s.get("voice_dur"))
-            except (TypeError, ValueError):
-                pass
-        if s.get("speed") is not None:
-            try:
-                seg.speed = float(s.get("speed"))
-            except (TypeError, ValueError):
-                pass
-        out.append(seg)
-    return out
+    return _segments_from_rows(pr.get("segments") or [], use_vi=use_vi)
 
 
 def _split_project_vi_on_punctuation(pr: Dict) -> int:
@@ -201,7 +206,7 @@ def _split_project_vi_on_punctuation(pr: Dict) -> int:
 def _polish_project_vi(pr: Dict, tr: Dict) -> Optional[int]:
     """Reflow Vietnamese subtitles in the GUI project using the same CLI polish pass."""
     rows = pr.get("segments") or []
-    if not rows or not tr.get("polish_subtitles", True):
+    if not rows or srt_utils.keep_source_timing(tr) or not tr.get("polish_subtitles", True):
         return None
     segs = _segments_from_project(pr, use_vi=True)
     polished = srt_utils.polish_translated_segments(
@@ -220,37 +225,64 @@ def _polish_project_vi(pr: Dict, tr: Dict) -> Optional[int]:
     # dòng, nên sau khi chia lại thì bảng "Sửa từng dòng" mất hết tiếng Trung và
     # bấm Dịch lần nữa là không còn gì để dịch.
     pr["segments"] = [
-        {"start": s.start, "end": s.end,
-         "src": src, "vi": s.text, "speaker": s.speaker}
+        _row_from_polished(s, src)
         for s, src in zip(polished, _src_theo_moc(rows, polished))
     ]
     return len(polished) - len(segs)
 
 
+def _row_from_polished(seg: Segment, src: str) -> Dict:
+    row = {"start": seg.start, "end": seg.end,
+           "src": src, "vi": seg.text, "speaker": seg.speaker}
+    copy_metadata(seg, row)
+    return row
+
+
+def _finalize_project_vi(pr: Dict, tr: Optional[Dict] = None) -> int:
+    """Giữ nguyên mốc thời gian, làm sạch chữ Việt lần cuối (ngữ pháp + 环=điểm)."""
+    rows = pr.get("segments") or []
+    segs = _segments_from_project(pr, use_vi=True)
+    if not segs:
+        return 0
+    if tr is None:
+        tr = (_load_cfg().get("translation") or {})
+    changed = finalize_spoken_vi_cues(segs, tr)
+    if not changed:
+        return 0
+    for row, seg in zip(rows, segs):
+        row["vi"] = seg.text
+    return changed
+
+
 def _src_theo_moc(rows: List[Dict], polished: List[Segment]) -> List[str]:
-    """Gán câu gốc của từng dòng cũ cho dòng mới bao mốc bắt đầu của nó.
+    """Gán câu gốc cho dòng Việt mới theo chồng lấp đồng hồ.
 
     Một dòng gốc bị chia thành nhiều dòng Việt thì câu gốc đặt ở dòng con ĐẦU
     TIÊN (các dòng con sau để trống), để không nhân bản cùng một câu Trung ra
-    nhiều dòng rồi dịch lại thừa.
+    nhiều dòng rồi dịch lại thừa. Một dòng Việt bao nhiều dòng gốc thì ghép
+    hết câu Trung chồng lấp — không bỏ mất nguồn khi polish gộp.
     """
-    def _start(row: Dict) -> float:
+    def _clock(row: Dict, key: str) -> float:
         try:
-            return float(row.get("start", 0) or 0.0)
+            return float(row.get(key, 0) or 0.0)
         except (TypeError, ValueError):
             return 0.0
 
     out: List[str] = []
-    j = 0                      # hàng gốc đang xét (cả hai danh sách đã theo thời gian)
-    da_gan = -1
+    used = set()
     for seg in polished:
-        while j + 1 < len(rows) and _start(rows[j + 1]) <= seg.start + 0.02:
-            j += 1
-        if j != da_gan and j < len(rows):
-            out.append(rows[j].get("src") or "")
-            da_gan = j
-        else:
-            out.append("")
+        pieces = []
+        for i, row in enumerate(rows):
+            rs, re = _clock(row, "start"), _clock(row, "end")
+            overlap = max(0.0, min(float(seg.end), re) - max(float(seg.start), rs))
+            if overlap <= 0.0:
+                continue
+            src = (row.get("src") or "").strip()
+            if not src or i in used:
+                continue
+            pieces.append(src)
+            used.add(i)
+        out.append(" ".join(pieces))
     return out
 
 
@@ -290,6 +322,8 @@ def _prepare_project_src_for_translation(pr: Dict, tr: Dict) -> int:
     """Split overfull rows and merge ASR fragments into translation units."""
     rows = pr.get("segments") or []
     if not rows:
+        return 0
+    if srt_utils.keep_source_timing(tr):
         return 0
     if not (tr.get("split_on_punctuation", True)
             or tr.get("merge_source_fragments", True)):
@@ -357,7 +391,15 @@ def _active_media_span(pr: Dict) -> Dict:
     Project rows and UI timings stay in original video time. Pipeline work uses
     the returned range as a local 0-based clip.
     """
-    source_dur = float(pr.get("duration") or ffprobe_duration(pr["video"]) or 0.0)
+    source_dur = float(pr.get("picture_duration") or pr.get("duration") or 0.0)
+    if source_dur <= 0.5:
+        clocks = pr.get("clocks") or {}
+        try:
+            source_dur = float(clocks.get("picture_duration") or 0.0)
+        except (TypeError, ValueError):
+            source_dur = 0.0
+    if source_dur <= 0.5:
+        source_dur = float(ffprobe_duration(pr["video"]) or 0.0)
     source_dur = max(0.01, source_dur)
     opt = pr.get("options", {}) or {}
     enabled = bool(opt.get("trim_enabled"))
@@ -425,6 +467,12 @@ def _segments_from_rows(rows: List[Dict], use_vi: bool = True) -> List[Segment]:
             txt = row.get("src") or ""
         seg = Segment(i, float(row.get("start", 0)), float(row.get("end", 0)),
                       txt, speaker=row.get("speaker"))
+        for attr in METADATA_FIELDS:
+            if attr in row:
+                val = row[attr]
+                if attr == "allowed_source_names" and val is not None and not isinstance(val, tuple):
+                    val = tuple(val) if not isinstance(val, str) else (val,)
+                setattr(seg, attr, val)
         if row.get("placed") is not None:
             placed = _float_or_none(row.get("placed"))
             if placed is not None:
@@ -460,6 +508,8 @@ def _rows_from_segments(segments: List[Segment], key: str,
             base["vi"] = seg.text
         if seg.speaker:
             base["speaker"] = seg.speaker
+        for attr in METADATA_FIELDS:
+            base[attr] = getattr(seg, attr)
         for transient in ("placed", "speed", "voice_dur"):
             base.pop(transient, None)
         rows.append(base)
@@ -498,19 +548,35 @@ def _load_local_rows_from_srt(src_srt: str,
     src = srt_utils.load_srt_file(src_srt) if os.path.exists(src_srt) else []
     vi = srt_utils.load_srt_file(vi_srt) if vi_srt and os.path.exists(vi_srt) else []
     rows: List[Dict] = []
-    if vi and len(vi) != len(src):
+    if not src:
         for s in vi:
             rows.append({"start": s.start, "end": s.end,
                          "src": "", "vi": s.text, "speaker": s.speaker})
-    else:
-        for i, s in enumerate(src):
-            rows.append({
-                "start": s.start,
-                "end": s.end,
-                "src": s.text,
-                "vi": vi[i].text if i < len(vi) else "",
-                "speaker": s.speaker,
-            })
+        return rows
+    originals = [s.text for s in src]
+    if vi:
+        from ..translate.reuse import reuse_translated_cues
+        ok, _dirty, _copied, _repaired = reuse_translated_cues(src, vi)
+        if ok:
+            for i, s in enumerate(src):
+                row = {
+                    "start": s.start,
+                    "end": s.end,
+                    "src": originals[i],
+                    "vi": s.text,
+                    "speaker": s.speaker,
+                }
+                copy_metadata(s, row)
+                rows.append(row)
+            return rows
+    for i, s in enumerate(src):
+        rows.append({
+            "start": s.start,
+            "end": s.end,
+            "src": originals[i],
+            "vi": vi[i].text if vi and len(vi) == len(src) and i < len(vi) else "",
+            "speaker": s.speaker,
+        })
     return rows
 
 

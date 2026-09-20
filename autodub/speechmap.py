@@ -74,9 +74,14 @@ class SpeechMap:
     """Danh sách mốc (start, end) của từng ký tự/từ ASR nghe được, đơn vị GIÂY."""
 
     marks: List[Tuple[float, float]] = field(default_factory=list)
+    time_scale: float = 1.0
 
     def __post_init__(self) -> None:
         self.marks = _clean_marks(self.marks)
+        try:
+            self.time_scale = float(self.time_scale or 1.0)
+        except (TypeError, ValueError):
+            self.time_scale = 1.0
 
     # ---------------------------------------------------------------- cơ bản #
     def __len__(self) -> int:
@@ -93,8 +98,22 @@ class SpeechMap:
         """Dịch toàn bộ mốc (dùng khi chỉ xử lý một đoạn đã cắt của video)."""
         d = float(seconds or 0.0)
         if abs(d) < 1e-9:
-            return SpeechMap(list(self.marks))
-        return SpeechMap([(a + d, b + d) for a, b in self.marks])
+            return SpeechMap(list(self.marks), time_scale=self.time_scale)
+        return SpeechMap([(a + d, b + d) for a, b in self.marks],
+                         time_scale=self.time_scale)
+
+    def scale(self, factor: float) -> "SpeechMap":
+        """Kéo mọi mốc theo tỉ lệ đồng hồ hình/tiếng (không đổi khoảng tương đối)."""
+        try:
+            f = float(factor)
+        except (TypeError, ValueError):
+            f = 1.0
+        if abs(f - 1.0) < 1e-12:
+            return SpeechMap(list(self.marks), time_scale=self.time_scale)
+        return SpeechMap(
+            [(a * f, b * f) for a, b in self.marks],
+            time_scale=float(self.time_scale or 1.0) * f,
+        )
 
     # -------------------------------------------------------------- tra cứu #
     def _bisect(self, t: float) -> int:
@@ -267,6 +286,7 @@ class SpeechMap:
     # ------------------------------------------------------------- lưu / đọc #
     def to_dict(self) -> dict:
         return {"phien_ban": 1,
+                "time_scale": round(float(self.time_scale or 1.0), 8),
                 "moc": [[round(a, 3), round(b, 3)] for a, b in self.marks]}
 
     def save(self, path: str) -> bool:
@@ -282,9 +302,14 @@ class SpeechMap:
     def from_dict(cls, data) -> "SpeechMap":
         if isinstance(data, dict):
             marks = data.get("moc") or data.get("marks") or []
+            try:
+                scale = float(data.get("time_scale") or 1.0)
+            except (TypeError, ValueError):
+                scale = 1.0
         else:
             marks = data or []
-        return cls(marks)
+            scale = 1.0
+        return cls(marks, time_scale=scale)
 
     @classmethod
     def load(cls, path: str) -> Optional["SpeechMap"]:
@@ -306,6 +331,7 @@ class SpeechMap:
 #  STATE["running"]), một bản đồ dùng chung là đủ và an toàn.
 # --------------------------------------------------------------------------- #
 _ACTIVE: Optional[SpeechMap] = None
+_ACTIVE_PATH: Optional[str] = None
 _ACTIVE_LOCK = threading.Lock()
 
 # Công tắc tắt bản đồ để so sánh trước/sau (dùng khi đo kiểm thử):
@@ -317,10 +343,14 @@ def disabled() -> bool:
     return str(os.environ.get(_ENV_OFF, "")).strip().lower() in ("1", "true", "yes")
 
 
-def set_active(m: Optional[SpeechMap]) -> Optional[SpeechMap]:
-    global _ACTIVE
+def set_active(m: Optional[SpeechMap], path: Optional[str] = None) -> Optional[SpeechMap]:
+    global _ACTIVE, _ACTIVE_PATH
     with _ACTIVE_LOCK:
         _ACTIVE = m if (m is not None and not m.empty) else None
+        if _ACTIVE is None:
+            _ACTIVE_PATH = None
+        elif path:
+            _ACTIVE_PATH = os.path.abspath(path)
         return _ACTIVE
 
 
@@ -329,10 +359,16 @@ def get_active() -> Optional[SpeechMap]:
         return None if disabled() else _ACTIVE
 
 
+def active_path() -> Optional[str]:
+    with _ACTIVE_LOCK:
+        return _ACTIVE_PATH
+
+
 def clear_active() -> None:
-    global _ACTIVE
+    global _ACTIVE, _ACTIVE_PATH
     with _ACTIVE_LOCK:
         _ACTIVE = None
+        _ACTIVE_PATH = None
 
 
 def slice_window(start: float, end: float, weights: Sequence[float],
@@ -359,4 +395,4 @@ def default_path(out_dir: str, stem: str) -> str:
 def load_active(path: str) -> Optional[SpeechMap]:
     """Đọc bản đồ từ file rồi đặt làm bản đồ đang dùng."""
     m = SpeechMap.load(path) if path and os.path.exists(path) else None
-    return set_active(m)
+    return set_active(m, path if m is not None else None)

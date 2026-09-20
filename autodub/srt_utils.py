@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import math
 from dataclasses import dataclass, field, replace
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import speechmap
 
@@ -27,6 +27,11 @@ class Segment:
     placed_start: Optional[float] = None  # thời điểm đặt thực tế trên timeline
     speed: float = 1.0                    # hệ số tăng tốc đã áp dụng
     voice_duration: Optional[float] = None # độ dài voice sau khi tăng tốc (giây)
+    semantic_group: Optional[str] = None  # validated sentence ownership, separate from display
+    hard_boundary: bool = False          # boundary BEFORE this cue
+    scene: Optional[str] = None
+    chapter: Optional[str] = None
+    allowed_source_names: tuple = ()     # explicitly retained glossary entries
 
     @property
     def duration(self) -> float:
@@ -49,6 +54,19 @@ _LEADING_TRANSLATION_META_RE = re.compile(
     r")\s*",
     re.IGNORECASE,
 )
+
+
+def keep_source_timing(tr: Optional[Dict[str, Any]] = None) -> bool:
+    """Một dòng SRT Trung = một dòng Việt, cùng start/end.
+
+    Tắt gộp mảnh ASR theo ý và tắt chia lại sub Việt (polish). Mặc định bật:
+    gộp câu rồi chia lại timestamp Việt làm thoại dài hơn miệng Trung.
+    """
+    if not isinstance(tr, dict):
+        return True
+    if "keep_source_timing" in tr:
+        return bool(tr.get("keep_source_timing"))
+    return True
 
 
 def split_text_on_punctuation(text: str,

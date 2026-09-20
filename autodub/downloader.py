@@ -2,8 +2,9 @@
 
 - Lấy đúng LUỒNG GỐC chất lượng cao rồi ghép video+audio -> mp4. Bilibili KHÔNG
   chèn watermark vào luồng tải, nên bản tải về sạch (không logo do trang thêm).
-- Bilibili công khai ưu tiên API/CDN trực tiếp; YouTube, nguồn khác và trường
-  hợp API lỗi tự dùng yt-dlp. Bản nét bị khóa có thể cần cookies (xem config).
+- Bilibili công khai ưu tiên API/CDN trực tiếp; YouTube/Douyin/TikTok và nguồn
+  khác dùng yt-dlp. YouTube 429/bot thì lần lượt thử cookie Chrome/Edge/Firefox
+  và JS runtime (node/deno), không tải lại Range vô ích.
 - Nếu video có LOGO CHÁY CỨNG ở góc (do người đăng chèn) thì dùng tùy chọn
   video.delogo trong config để xoá mờ đi khi render.
 """
@@ -12,15 +13,76 @@ from __future__ import annotations
 import os
 import re
 import sys
-from typing import Callable, Dict, List, Optional, Tuple
+import time
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from urllib.parse import urlparse
+
+from .download_site import (
+    canonical_video_url,
+    cookie_browser_candidates,
+    cookie_hint as _site_cookie_hint,
+    detect_site,
+    installed_cookie_browsers,
+    needs_cookie_fallback,
+    site_label,
+    site_ytdlp_args,
+)
 from .utils import log, run, which, ffprobe_video_size, ffprobe_has_stream, ffprobe_is_blank_video
+
+_AUTH_RETRY_SLEEP = 1.5
 
 
 _URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 _PROGRESS_PREFIX = "__AUTODUB_PROGRESS__|"
 _PATH_PREFIX = "__AUTODUB_FILE__|"
+
+
+class _TransferWatchdog:
+    """Measure useful byte progress, independently of logging/retry chatter."""
+    def __init__(self, timeout=60.0, minimum_bytes=64 * 1024):
+        self.timeout, self.minimum_bytes = timeout, minimum_bytes
+        self.reset()
+
+    def reset(self):
+        self.active = True
+        self.phase = "connecting"
+        self.stream = None
+        self.highwater = self.anchor = 0
+        self.at = time.monotonic()
+
+    def update(self, info):
+        stream = (info.get("id"), info.get("format_id"))
+        if info.get("status") == "finished":
+            # One completed representation is not a completed video download.
+            # Repeated cached/finished notifications must not extend the wait.
+            if self.phase != "between_streams" or stream != self.stream:
+                self.at = time.monotonic()
+            self.stream, self.phase, self.active = stream, "between_streams", True
+            return
+        if info.get("status") != "downloading":
+            return
+        count = info.get("downloaded")
+        if count is None:
+            return
+        if stream != self.stream:
+            self.stream, self.anchor, self.highwater = stream, count, count
+            self.at = time.monotonic()
+        self.active = True
+        self.phase = "downloading"
+        self.highwater = max(self.highwater, count)
+        if self.highwater - self.anchor >= self.minimum_bytes:
+            self.anchor, self.at = self.highwater, time.monotonic()
+
+    def observe_line(self, plain):
+        if plain.startswith("[Merger]") or plain.startswith(_PATH_PREFIX):
+            self.active, self.phase = False, "postprocessing"
+
+    def check(self):
+        limit = max(120.0, self.timeout) if self.phase == "connecting" else self.timeout
+        if self.active and time.monotonic() - self.at >= limit:
+            raise RuntimeError(f"Download stalled: timed out ({self.phase}, {limit:.0f}s); resume partial file")
 
 
 def _number(value) -> Optional[float]:
@@ -146,15 +208,25 @@ def _positive_int(value, default: int, lo: int = 1, hi: int = 32) -> int:
 
 
 def _download_speed_options(concurrent_fragments=8,
-                            external_downloader: Optional[str] = "auto") -> Tuple[List[str], str]:
+                            external_downloader: Optional[str] = "auto",
+                            site: str = "") -> Tuple[List[str], str]:
     """Tuỳ chọn tăng tốc cho yt-dlp, tách riêng để test không phải tải thật."""
     n_frag = _positive_int(concurrent_fragments, 8, 1, 32)
+    site_l = str(site or "").strip().lower()
+    # 8 Range cùng một CDN Bilibili hay bị throttle: đứng 15 giây rồi nhỏ giọt
+    # còn vài chục KiB/s. Giữ tối đa 4 mảnh và chia HTTP 4 MiB để đổi máy chủ
+    # nhanh khi một kết nối chết.
+    if site_l == "bilibili":
+        n_frag = min(n_frag, 4)
+    retries = "15" if site_l == "bilibili" else "10"
+    socket_timeout = "25" if site_l == "bilibili" else "15"
     cmd = [
         "--continue",
         "--part",
         "--no-mtime",
-        "--retries", "10",
-        "--fragment-retries", "10",
+        "--retries", retries,
+        "--fragment-retries", retries,
+        "--socket-timeout", socket_timeout,
         # Bilibili/CDN thường trả 503 trong vài giây khi có nhiều request
         # cùng lúc.  Chờ tăng dần giúp yt-dlp tự hồi phục thay vì dồn 10 lần
         # retry ngay lập tức rồi bị CDN chặn tiếp.
@@ -163,6 +235,9 @@ def _download_speed_options(concurrent_fragments=8,
         "--concurrent-fragments", str(n_frag),
     ]
     notes = [f"{n_frag} fragment song song"]
+    if site_l == "bilibili":
+        cmd += ["--http-chunk-size", "4M"]
+        notes.append("chunk 4 MiB, tránh CDN nghẽn")
 
     choice = str(external_downloader or "").strip()
     choice_l = choice.lower()
@@ -365,10 +440,34 @@ def _resume_retry_options(speed_opts: List[str]) -> List[str]:
     return opts
 
 
+def _proxy_label(proxy: str) -> str:
+    """Ẩn user/password khi ghi log proxy."""
+    raw = str(proxy or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return "proxy"
+    host = parsed.hostname or "proxy"
+    port = f":{parsed.port}" if parsed.port else ""
+    scheme = parsed.scheme or "proxy"
+    return f"{scheme}://{host}{port}"
+
+
+def _normalise_download_proxy(proxy: Optional[str]) -> str:
+    raw = str(proxy or "").strip()
+    if raw.lower() in {"", "none", "null", "off", "false", "direct", "no"}:
+        return ""
+    return raw
+
+
 def _build_download_command(url: str, out_tmpl: str, fmt: str,
                             speed_opts: List[str],
                             cookies_from_browser: Optional[str] = None,
-                            cookies_file: Optional[str] = None) -> List[str]:
+                            cookies_file: Optional[str] = None,
+                            extra_args: Optional[List[str]] = None,
+                            proxy: Optional[str] = None) -> List[str]:
     """Tạo lệnh yt-dlp; tách riêng để retry và unit test không tải mạng."""
     cmd = [
         *_ytdlp_cmd(),
@@ -378,6 +477,7 @@ def _build_download_command(url: str, out_tmpl: str, fmt: str,
         "--windows-filenames",
         "-o", out_tmpl,
         *speed_opts,
+        *(extra_args or []),
         # Ép mỗi lần cập nhật nằm trên một dòng để backend đọc được ngay thay
         # vì giữ progress bar bằng ký tự \r. Template dùng số thô để Python tự
         # định dạng ổn định, không phụ thuộc ngôn ngữ/ANSI của yt-dlp.
@@ -397,6 +497,8 @@ def _build_download_command(url: str, out_tmpl: str, fmt: str,
         cmd += ["--cookies-from-browser", cookies_from_browser]
     if cookies_file:
         cmd += ["--cookies", cookies_file]
+    if proxy:
+        cmd += ["--proxy", proxy]
     cmd.append(url)
     return cmd
 
@@ -443,6 +545,50 @@ def _validate_download_file(path: str, cookie_hint: str,
     return path
 
 
+def _listed_media_files(out_dir: str) -> Set[str]:
+    try:
+        names = os.listdir(out_dir)
+    except OSError:
+        return set()
+    paths = set()
+    for name in names:
+        if name.lower().endswith((".mp4", ".mkv", ".webm", ".m4a")):
+            paths.add(os.path.join(out_dir, name))
+    return paths
+
+
+def _resolve_downloaded_path(out_dir: str, stdout: str, started_at: float,
+                             before_paths: Optional[Set[str]] = None) -> str:
+    """Lấy đúng file vừa tải. Không nhặt mp4 cũ trong cùng thư mục downloads/."""
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    marked_paths = [line[len(_PATH_PREFIX):] for line in lines
+                    if line.startswith(_PATH_PREFIX)]
+    for path in reversed(marked_paths):
+        if path and os.path.isfile(path):
+            return path
+    for line in reversed(lines):
+        if line.startswith(_PROGRESS_PREFIX) or line.startswith(_PATH_PREFIX):
+            continue
+        if os.path.isfile(line):
+            return line
+
+    before_paths = before_paths or set()
+    cands = []
+    for path in _listed_media_files(out_dir):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        existed = path in before_paths
+        if existed and mtime < started_at - 1.0:
+            continue
+        if not existed or mtime >= started_at - 1.0:
+            cands.append(path)
+    if not cands:
+        raise RuntimeError("Không tìm thấy file sau khi tải.")
+    return max(cands, key=os.path.getmtime)
+
+
 def download_video(
     url: str,
     out_dir: str,
@@ -452,76 +598,91 @@ def download_video(
     concurrent_fragments=8,
     external_downloader: Optional[str] = "auto",
     progress_callback: Optional[Callable[[Dict], None]] = None,
+    proxy: Optional[str] = None,
 ) -> str:
     """Tải 1 video, trả về đường dẫn file mp4 đã lưu."""
-    url = extract_url(url)
+    url = canonical_video_url(extract_url(url))
     if not url:
         raise RuntimeError("Không thấy URL hợp lệ. Hãy dán riêng link bắt đầu bằng http:// hoặc https://.")
     os.makedirs(out_dir, exist_ok=True)
+    before_paths = _listed_media_files(out_dir)
+    started_at = time.time()
     cookies_from_browser = _normalise_cookie_browser(cookies_from_browser)
-    _cookie_hint = (
-        "Kiểm tra link, hoặc bản nét cần đăng nhập: đặt "
-        "download.cookies_from_browser: edge:Default (hoặc chrome/firefox - trình duyệt bạn "
-        "ĐÃ đăng nhập Bilibili) trong config.yaml."
-    )
+    extra_args = site_ytdlp_args(url)
+    _cookie_hint = _site_cookie_hint(url)
+    site = detect_site(url)
+    proxy = _normalise_download_proxy(proxy)
 
     # Bilibili công khai đi qua API/CDN trực tiếp trước. Cách này không chạm DB
     # cookie đang bị khóa của Edge, thử nhiều mirror cho từng khối và nối tiếp
     # .part. Nếu Bilibili đổi API/chặn vùng, yt-dlp bên dưới vẫn là đường lui.
     from . import bilibili_direct
-    if bilibili_direct.is_bilibili_url(url):
-        log("Đang phân tích video bằng bộ tải Bilibili trực tiếp…", "step")
-        direct_last = {"at": 0.0, "status": ""}
+    previous_proxy = bilibili_direct.set_download_proxy(proxy)
+    try:
+        if proxy:
+            log("Tải qua proxy %s (né đường quốc tế nhà mạng nghẽn)."
+                % _proxy_label(proxy), "info")
+        if bilibili_direct.is_bilibili_url(url):
+            log("Đang phân tích video bằng bộ tải Bilibili trực tiếp…", "step")
+            direct_last = {"at": 0.0, "status": ""}
 
-        def _on_direct_progress(info: Dict) -> None:
-            import time
-            now = time.monotonic()
-            status = str(info.get("status") or "")
-            percent = info.get("percent")
-            important = (status != direct_last["status"] or
-                         (percent is not None and float(percent) >= 97.0))
-            if not important and now - direct_last["at"] < 1.0:
-                return
-            direct_last.update({"at": now, "status": status})
-            text = str(info.get("text") or "Đang tải Bilibili…")
-            log(text, "info")
-            if progress_callback:
-                progress_callback(info)
+            def _on_direct_progress(info: Dict) -> None:
+                import time
+                now = time.monotonic()
+                status = str(info.get("status") or "")
+                percent = info.get("percent")
+                important = (status != direct_last["status"] or
+                             bool(info.get("event")) or
+                             (percent is not None and float(percent) >= 97.0))
+                if not important and now - direct_last["at"] < 1.0:
+                    return
+                direct_last.update({"at": now, "status": status})
+                text = str(info.get("text") or "Đang tải Bilibili…")
+                log(text, "info")
+                if progress_callback:
+                    progress_callback(info)
 
-        try:
-            direct_path, direct_qn, direct_kind = bilibili_direct.download_bilibili(
-                url, out_dir, quality=str(quality), cookies_file=cookies_file,
-                progress_callback=_on_direct_progress)
-            log("Bilibili trực tiếp: %s · luồng %s · đã tự chọn CDN nhanh nhất."
-                % (bilibili_direct.quality_label(direct_qn), direct_kind.upper()),
-                "info")
-            return _validate_download_file(
-                direct_path, _cookie_hint, progress_callback)
-        except Exception as direct_error:
-            log("Bộ tải Bilibili trực tiếp chưa lấy được video (%s); "
-                "tự chuyển sang yt-dlp…" % str(direct_error)[:220], "warn")
+            try:
+                direct_path, direct_qn, direct_kind = bilibili_direct.download_bilibili(
+                    url, out_dir, quality=str(quality), cookies_file=cookies_file,
+                    progress_callback=_on_direct_progress)
+                log("Bilibili trực tiếp: %s · luồng %s · đã tự chọn CDN nhanh nhất."
+                    % (bilibili_direct.quality_label(direct_qn), direct_kind.upper()),
+                    "info")
+                return _validate_download_file(
+                    direct_path, _cookie_hint, progress_callback)
+            except Exception as direct_error:
+                log("Bộ tải Bilibili trực tiếp chưa lấy được video (%s); "
+                    "tự chuyển sang yt-dlp…" % str(direct_error)[:220], "warn")
+    finally:
+        bilibili_direct.set_download_proxy(previous_proxy)
 
     fmt = _QUALITY.get(str(quality), _QUALITY["best"])
     out_tmpl = os.path.join(out_dir, "%(title).80s [%(id)s].%(ext)s")
-    speed_opts, speed_note = _download_speed_options(concurrent_fragments, external_downloader)
+    speed_opts, speed_note = _download_speed_options(
+        concurrent_fragments, external_downloader, site=site)
 
     cmd = _build_download_command(
         url, out_tmpl, fmt, speed_opts,
         cookies_from_browser=cookies_from_browser,
-        cookies_file=cookies_file)
+        cookies_file=cookies_file,
+        extra_args=extra_args, proxy=proxy)
 
-    log("Đang tải video (yt-dlp)...", "step")
+    log("Đang tải video %s (yt-dlp)..." % site_label(url), "step")
     log(f"Tăng tốc tải: {speed_note}.", "info")
     _cookie_error_seen = set()
+    watchdog = _TransferWatchdog()
 
     def _on_ytdlp_line(line: str) -> None:
         info = _parse_progress_line(line)
         if info is not None:
+            watchdog.update(info)
             log(info["text"], "info")
             if progress_callback:
                 progress_callback(info)
             return
         plain = _ANSI_RE.sub("", str(line or "")).strip()
+        watchdog.observe_line(plain)
         if plain.startswith("[Merger]"):
             log("Đang ghép luồng hình và âm thanh…", "info")
             if progress_callback:
@@ -559,9 +720,11 @@ def download_video(
                                "elapsed": elapsed, "text": text})
 
     def _run_download(download_cmd: List[str]):
+        watchdog.reset()
         return run(download_cmd, quiet=True, line_callback=_on_ytdlp_line,
                    heartbeat_callback=_on_download_heartbeat,
-                   heartbeat_interval=15.0)
+                   heartbeat_interval=15.0,
+                   health_check=watchdog.check if site == "bilibili" else None)
 
     res = None
     first_error = None
@@ -576,7 +739,8 @@ def download_video(
         if _browser_cookie_failed(e) and "--cookies-from-browser" in cmd:
             cookie_disabled = True
             log(f"Cookie {_cookie_browser_label(cookies_from_browser)} đang bị khóa "
-                "(hãy thoát hẳn msedge.exe nếu cần bản đăng nhập); "
+                f"(hãy thoát hẳn {_cookie_browser_label(cookies_from_browser)} "
+                "nếu cần cookie đăng nhập); "
                 "thử lại video công khai không dùng cookie…",
                 "warn")
             cmd = _without_option_value(cmd, "--cookies-from-browser")
@@ -594,11 +758,12 @@ def download_video(
             log("aria2c không tải được URL này; tự chuyển sang yt-dlp và tải tiếp…",
                 "warn")
             fallback_opts, _ = _download_speed_options(
-                concurrent_fragments, external_downloader="none")
+                concurrent_fragments, external_downloader="none", site=site)
             fallback_cmd = _build_download_command(
                 url, out_tmpl, fmt, fallback_opts,
                 cookies_from_browser=None if cookie_disabled else cookies_from_browser,
-                cookies_file=cookies_file)
+                cookies_file=cookies_file,
+                extra_args=extra_args, proxy=proxy)
             try:
                 res = _run_download(fallback_cmd)
                 cmd = fallback_cmd
@@ -606,13 +771,55 @@ def download_video(
                 first_error = retry_error
                 cmd = fallback_cmd
 
+        # YouTube bot/429 và Douyin thiếu cookie: thử Chrome/Edge/Firefox
+        # trước khi coi là lỗi mạng. Không tải lại Range vì cùng một trang
+        # chặn khách vãng lai sẽ 429 lần nữa.
+        if res is None and needs_cookie_fallback(url, first_error or e):
+            tried = {(cookies_from_browser or "").lower()}
+            if cookie_disabled:
+                tried.add("")
+            for spec in cookie_browser_candidates(
+                    cookies_from_browser, installed=installed_cookie_browsers()):
+                key = spec.lower()
+                if key in tried:
+                    continue
+                tried.add(key)
+                log("Nguồn %s chặn khách vãng lai; thử cookie %s…"
+                    % (site_label(url), _cookie_browser_label(spec)), "warn")
+                time.sleep(_AUTH_RETRY_SLEEP)
+                auth_cmd = _build_download_command(
+                    url, out_tmpl, fmt, speed_opts,
+                    cookies_from_browser=spec,
+                    cookies_file=cookies_file,
+                    extra_args=extra_args, proxy=proxy)
+                try:
+                    res = _run_download(auth_cmd)
+                    cmd = auth_cmd
+                    first_error = None
+                    cookie_disabled = False
+                    cookies_from_browser = spec
+                    break
+                except RuntimeError as auth_error:
+                    first_error = auth_error
+                    if _browser_cookie_failed(auth_error):
+                        log("Cookie %s đang bị khóa, bỏ qua."
+                            % _cookie_browser_label(spec), "warn")
+                        continue
+                    if not needs_cookie_fallback(url, auth_error):
+                        break
+
         # CDN có hai kiểu lỗi cần xử lý khác nhau:
-        #   - 416/503/429: Range hoặc phiên CDN cũ -> tải sạch một lần.
+        #   - 416/503: Range hoặc phiên CDN cũ -> tải sạch một lần.
         #   - RemoteDisconnected/IncompleteRead: kết nối đứt giữa file lớn
         #     -> giữ .part, chia chunk 10 MiB và nối tiếp bằng 1 fragment.
+        # YouTube/Douyin 429+bot không đi nhánh này (đã thử cookie ở trên).
         # Nếu bản best/4K vẫn không được, thử thêm 480p công khai.
-        if res is None and _transient_download_failed(first_error or e):
-            initial_error = first_error or e
+        cdn_error = first_error or e
+        skip_cdn = (needs_cookie_fallback(url, cdn_error)
+                    and not _connection_download_failed(cdn_error)
+                    and not _range_download_failed(cdn_error))
+        if res is None and not skip_cdn and _transient_download_failed(cdn_error):
+            initial_error = cdn_error
             connection_retry = _connection_download_failed(initial_error)
             retry_cookie = None if cookie_disabled else cookies_from_browser
             retry_qualities = [(fmt, "bản nét hiện tại")]
@@ -620,7 +827,7 @@ def download_video(
                 retry_qualities.append((_QUALITY["480"], "480p dự phòng"))
 
             base_internal_opts = _download_speed_options(
-                concurrent_fragments, "none")[0]
+                concurrent_fragments, "none", site=site)[0]
             # Khi mất kết nối, cho cùng chất lượng thêm một lượt nối tiếp.
             # Lượt thứ hai cũng giúp CDN cấp URL ký mới nếu URL cũ đã hết hạn.
             attempts_per_quality = 2 if connection_retry else 1
@@ -637,7 +844,8 @@ def download_video(
                     retry_cmd = _build_download_command(
                         url, out_tmpl, retry_fmt, retry_opts,
                         cookies_from_browser=retry_cookie,
-                        cookies_file=cookies_file)
+                        cookies_file=cookies_file,
+                        extra_args=extra_args, proxy=proxy)
                     if use_resume:
                         log(f"CDN ngắt giữa chừng; tải tiếp file .part "
                             f"({quality_note}, lượt {attempt + 1}/{attempts_per_quality}, "
@@ -679,20 +887,6 @@ def download_video(
             raise RuntimeError(
                 f"Tải thất bại. {_cookie_hint}\nChi tiết: {final_error}") from final_error
 
-    lines = [l.strip() for l in (res.stdout or "").splitlines() if l.strip()]
-    marked_paths = [line[len(_PATH_PREFIX):] for line in lines
-                    if line.startswith(_PATH_PREFIX)]
-    # Unit test/các bản yt-dlp cũ có thể trả trực tiếp path không có marker;
-    # vẫn giữ đường lui tương thích nhưng bỏ các dòng progress khỏi ứng viên.
-    plain_lines = [line for line in lines
-                   if not line.startswith(_PROGRESS_PREFIX)]
-    path = marked_paths[-1] if marked_paths else (plain_lines[-1] if plain_lines else "")
-    if not path or not os.path.exists(path):
-        # phòng khi --print không ra đường dẫn: tìm file mp4 mới nhất
-        cands = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
-                 if f.lower().endswith(".mp4")]
-        if not cands:
-            raise RuntimeError("Không tìm thấy file sau khi tải.")
-        path = max(cands, key=os.path.getmtime)
-
+    path = _resolve_downloaded_path(
+        out_dir, res.stdout or "", started_at, before_paths)
     return _validate_download_file(path, _cookie_hint, progress_callback)

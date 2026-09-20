@@ -1,0 +1,47 @@
+{
+"translated_sentences": [
+{
+"sentence_id": "s1",
+"source_ids": [1, 2, 3, 4, 5],
+"text_vi": "Tôi tự tay cắt một quả thận của em gái ruột chỉ vì nó nợ tôi một đồng chưa trả, nhưng nó chẳng hề buồn bực mà còn cầu xin tôi lấy luôn quả thận còn lại đem đi bán lấy tiền.",
+"speaker": null
+},
+{
+"sentence_id": "s2",
+"source_ids": [6, 7, 8, 9, 10, 11],
+"text_vi": "Tôi cười mỉm, không hề từ chối, sau đó lập tức đến chợ đen để bán thận của em gái kiếm chút tiền, liền giơ tay đập mạnh một bọc đồ còn ấm nóng lên mặt quầy.",
+"speaker": null
+},
+{
+"sentence_id": "s3",
+"source_ids": [12],
+"text_vi": ""Ông chủ, thận tươi vừa mới mổ xong đây, thu mua bao nhiêu tiền?"",
+"speaker": null
+},
+{
+"sentence_id": "s4",
+"source_ids": [13],
+"text_vi": ""Thu mua... một trăm nghìn tệ, tôi thu!"",
+"speaker": null
+},
+{
+"sentence_id": "s5",
+"source_ids": [14, 15, 16, 17],
+"text_vi": ""Có điều chàng trai à, hôm qua tôi mới buột miệng bảo thận bán được tiền, thế mà hôm nay cậu đã tự cắt phéng quả thận của mình rồi, cậu liều mạng thật đấy."",
+"speaker": null
+},
+{
+"sentence_id": "s6",
+"source_ids": [18, 19, 20],
+"text_vi": ""Biết sao được, em gái tôi bị thương rồi, vết thương rất nặng cần bồi bổ cơ thể, haizz."",
+"speaker": null
+}
+],
+"new_entities": [],
+"updated_summary": "Nhân vật chính mang quả thận tươi đến chợ đen bán kiếm tiền bồi dưỡng cho em gái bị thương, chủ quán tưởng cậu tự cắt thận mình nên kinh ngạc trước độ liều lĩnh.",
+"warnings": [
+"ASR cue 1: '砸' có thể là nhận dạng sai từ tiếng lóng/khẩu ngữ '割/挖' (cắt/mổ thận), dịch theo nghĩa cắt thận.",
+"ASR cue 9: '卖少年' có thể là nhận dạng sai của '卖少钱/卖点钱' (bán lấy chút tiền), dịch theo ngữ cảnh bán kiếm tiền.",
+"ASR cue 16: '旮' là khẩu ngữ/ASR của '割' (cắt/xẻo)."
+]
+}

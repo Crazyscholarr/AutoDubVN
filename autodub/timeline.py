@@ -27,6 +27,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+DEFAULT_SYNC_MODE = "strict"
+MAX_START_DRIFT_SECONDS = 5.0
+STRICT_SYNC_ALIASES = {
+    "strict", "hard", "frame", "frame-lock", "frame_locked",
+    "source", "original", "lock",
+}
+CASCADE_SYNC_ALIASES = {"cascade", "auto", "auto_fit", "autofit", "shift"}
+
+
+def _as_optional_bool(value) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def resolve_sync_mode(options=None, tts_cfg=None) -> str:
+    """Chọn chế độ đồng bộ thoại/hình.
+
+    `lock_av=True` (mặc định ở GUI) luôn ép strict: mỗi câu bám mốc gốc,
+    không dồn lệch sang câu sau. Tắt khóa thì mới cho cascade, và cascade
+    vẫn bị trần `max_start_drift` (5 giây) trong `fit_segments`.
+    """
+    opt = dict(options or {})
+    tc = dict(tts_cfg or {})
+    lock = _as_optional_bool(opt.get("lock_av", tc.get("lock_av")))
+    raw = opt.get("sync_mode", tc.get("sync_mode", DEFAULT_SYNC_MODE))
+    mode = str(raw or DEFAULT_SYNC_MODE).strip().lower()
+    if lock is True:
+        return "strict"
+    if lock is False:
+        return "strict" if mode in STRICT_SYNC_ALIASES else "cascade"
+    if mode in CASCADE_SYNC_ALIASES:
+        return "cascade"
+    return "strict"
+
 
 @dataclass
 class Placement:
@@ -51,6 +95,7 @@ def fit_segments(
     total_duration: Optional[float] = None,
     recover_drift: bool = True,
     base_speed: float = 1.0,
+    max_start_drift: float = MAX_START_DRIFT_SECONDS,
 ) -> List[Placement]:
     """Sắp lịch phát cho từng câu sao cho KHÔNG câu nào chồng lên câu nào.
 
@@ -62,12 +107,18 @@ def fit_segments(
     recover_drift      : True = khi đang trễ VÀ câu hiện tại còn dư hơi, tăng tốc
                          thêm (vẫn trong max_speed) để rút ngắn độ trễ ngay, thay
                          vì chỉ tránh trễ thêm và chờ khoảng nghỉ tự nhiên mới hết trễ.
+    max_start_drift    : trần lệch start so với hình (giây). Câu dài không được
+                         đẩy các câu sau đi mãi; mặc định 5s. 0 = bám sát mốc gốc.
     """
     n = len(starts)
     if n != len(natural_durations):
         raise ValueError("starts và natural_durations phải cùng độ dài")
     max_speed = max(1.0, float(max_speed))
     base_speed = min(max_speed, max(1.0, float(base_speed)))
+    try:
+        max_start_drift = max(0.0, float(max_start_drift))
+    except (TypeError, ValueError):
+        max_start_drift = MAX_START_DRIFT_SECONDS
 
     placements: List[Placement] = []
     cursor = 0.0
@@ -77,6 +128,8 @@ def fit_segments(
 
         drift_before = max(0.0, cursor - start)  # đang trễ bao nhiêu TRƯỚC câu này
         placed_start = max(start, cursor)
+        if placed_start - start > max_start_drift:
+            placed_start = start + max_start_drift
 
         # Mốc bắt đầu của câu kế tiếp (theo thời gian GỐC) để xác định ô trống.
         if i + 1 < n:
@@ -227,6 +280,7 @@ def auto_fit(
     total_duration: Optional[float] = None,
     recover_drift: bool = True,
     target_drift: float = 0.6,
+    max_start_drift: float = MAX_START_DRIFT_SECONDS,
 ) -> Tuple[List[Placement], float]:
     """Tìm TỐC ĐỘ NỀN nhỏ nhất đủ để cả đoạn không bị trôi, rồi xếp lịch.
 
@@ -242,7 +296,8 @@ def auto_fit(
     def _try(base: float):
         pl = fit_segments(starts, natural_durations, max_speed=max_speed,
                           min_gap=min_gap, total_duration=total_duration,
-                          recover_drift=recover_drift, base_speed=base)
+                          recover_drift=recover_drift, base_speed=base,
+                          max_start_drift=max_start_drift)
         worst = max((p.drift for p in pl), default=0.0)
         return pl, worst
 

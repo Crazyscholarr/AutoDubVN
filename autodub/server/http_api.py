@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import copy
+import math
 import mimetypes
 import os
 import re
@@ -22,13 +23,17 @@ from .state import (HERE, UI_DIR, STATE, PROJECTS, REV,
                     _LOCK, _NEXT_ID, _CANCEL_EVENT, _DOWNLOAD_SEM, JOB_MANAGER,
                     submit_job, shutdown_background_jobs,
                     bump_rev, _log, _progress, _find)
-from .helpers import _cleanup_temp_files
+from .helpers import _cleanup_temp_files, _path_under
 from .config_api import (_load_cfg, _translation_cfg_for_gui,
                          _tts_cfg_for_gui, _save_translation_cfg,
+                         _content_pipeline_cfg_for_gui,
+                         _save_content_pipeline_cfg,
+                         _dang_youtube_cfg_for_gui, _save_dang_youtube_cfg,
+                         _nvidia_catalog_for_gui,
                          _test_translation_api)
 from .projects import get_project, _save_project_state
 from .render import render_preview
-from .pipeline import run_pipeline
+from .pipeline import run_pipeline, ack_caption_review, rerecognize_caption_gap
 from . import manual_api
 from . import video_tools_api
 from . import content_api
@@ -56,30 +61,50 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(body)
 
     def _body(self) -> Dict:
+        if self.headers.get("Transfer-Encoding"):
+            self.close_connection = True
+            raise ValueError("Transfer-Encoding không được hỗ trợ; hãy gửi Content-Length.")
         n = int(self.headers.get("Content-Length") or 0)
+        if n < 0 or n > 16 * 1024 * 1024:
+            self.close_connection = True
+            raise ValueError("Kích thước yêu cầu không hợp lệ (tối đa 16 MB).")
         if not n:
             return {}
         try:
-            return json.loads(self.rfile.read(n).decode("utf-8"))
-        except Exception:
-            return {}
+            body = json.loads(self.rfile.read(n).decode("utf-8"))
+        except (UnicodeError, ValueError) as exc:
+            raise ValueError("Nội dung yêu cầu phải là JSON hợp lệ.") from exc
+        if not isinstance(body, dict):
+            raise ValueError("Nội dung yêu cầu phải là một đối tượng JSON.")
+        return body
 
     def _file(self, path: str, ctype: Optional[str] = None):
-        if not os.path.exists(path):
+        if not os.path.isfile(path):
             self._json({"error": "not found"}, 404)
             return
         ctype = ctype or (mimetypes.guess_type(path)[0] or "application/octet-stream")
         size = os.path.getsize(path)
         rng = self.headers.get("Range")
-        if rng:
-            m = re.match(r"bytes=(\d*)-(\d*)", rng)
-            start = int(m.group(1)) if m and m.group(1) else 0
-            end = int(m.group(2)) if m and m.group(2) else size - 1
-            end = min(end, size - 1)
-            start = max(0, min(start, end))
+        # Unsupported/multipart ranges are ignored; a single valid byte range
+        # must preserve suffix semantics and report unsatisfiable offsets.
+        m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip()) if rng else None
+        if m and any(m.groups()) and self.command != "HEAD":
+            if m.group(1):
+                start = int(m.group(1))
+                end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+                end = size - 1
+            if size == 0 or start >= size or end < start:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             length = end - start + 1
             self.send_response(206)
             self.send_header("Content-Type", ctype)
@@ -107,6 +132,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(size))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
+        if self.command == "HEAD":
+            return
         try:
             with open(path, "rb") as f:
                 shutil.copyfileobj(f, self.wfile)
@@ -116,6 +143,26 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- GET ----------------
     def do_GET(self):
+        return self._dispatch(self._get)
+
+    def do_HEAD(self):
+        return self.do_GET()
+
+    def _dispatch(self, handler):
+        try:
+            return handler()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError,
+                TimeoutError):
+            self.close_connection = True
+        except (ValueError, TypeError) as exc:
+            self.close_connection = True
+            return self._json({"error": str(exc)}, 400)
+        except Exception as exc:
+            self.close_connection = True
+            _log(f"HTTP {self.command}: {exc}", "err")
+            return self._json({"error": str(exc)}, 500)
+
+    def _get(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         p = u.path
@@ -123,15 +170,18 @@ class Handler(BaseHTTPRequestHandler):
         if p in ("/", "/index.html"):
             return self._file(os.path.join(UI_DIR, "index.html"), "text/html; charset=utf-8")
 
-        # File tĩnh của giao diện (style.css, app.js...) - chỉ cho phép tên
-        # file phẳng nằm NGAY TRONG thư mục ui/, chặn mọi kiểu ../ lách ra ngoài.
+        # File tĩnh của giao diện. Chỉ tên an toàn; /js/*.js là các file
+        # con theo tính năng. Chặn mọi kiểu ../ lách ra ngoài.
         if re.fullmatch(r"/[A-Za-z0-9_\-.]+\.(css|js|svg|png|woff2?)", p):
             return self._file(os.path.join(UI_DIR, p.lstrip("/")))
+        if re.fullmatch(r"/js/[A-Za-z0-9_\-.]+\.js", p):
+            rel = p.lstrip("/").replace("/", os.sep)
+            return self._file(os.path.join(UI_DIR, rel))
 
         if p == "/api/local_image":
             # Thumbnail cho kho ảnh chế độ Kể chuyện: webview không đọc được
             # file:// nên phải phát qua server. Chỉ phục vụ đúng file ảnh.
-            raw = urllib.parse.unquote(q.get("path", [""])[0] or "")
+            raw = q.get("path", [""])[0] or ""
             ext = os.path.splitext(raw)[1].lower()
             if ext not in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif",
                            ".tif", ".tiff"}:
@@ -142,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/local_video":
             # Xem trước video người dùng vừa chọn trong khung Kể chuyện.
-            raw = urllib.parse.unquote(q.get("path", [""])[0] or "")
+            raw = q.get("path", [""])[0] or ""
             ext = os.path.splitext(raw)[1].lower()
             if ext not in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv",
                            ".ts", ".m4v"}:
@@ -154,24 +204,28 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/state":
             # Phải THẬT NHẸ: giao diện gọi mỗi 1.2 giây. Không trả nội dung dự án
             # ở đây, chỉ trả số hiệu phiên bản để bên kia biết có cần tải lại không.
+            nvenc = STATE["nvenc"]
+            if nvenc is None:
+                nvenc = has_nvenc()
             with _LOCK:
-                if STATE["nvenc"] is None:
-                    STATE["nvenc"] = has_nvenc()
+                STATE["nvenc"] = nvenc
                 sel = STATE["selected"]
                 pr = PROJECTS.get(sel) if sel else None
-                return self._json({
-                    "queue": STATE["queue"], "selected": sel,
+                payload = {
+                    "queue": copy.deepcopy(STATE["queue"]), "selected": sel,
                     "running": STATE["running"], "busy": STATE["busy"],
-                    "progress": STATE["progress"], "nvenc": STATE["nvenc"],
+                    "progress": dict(STATE["progress"]), "nvenc": STATE["nvenc"],
                     "rev": REV.get(sel, 0) if sel else 0,
                     "seg_count": len(pr.get("segments", [])) if pr else 0,
                     "log": STATE["log"][-8:],
-                    "manual": dict(STATE.get("manual") or {}),
+                    "manual": copy.deepcopy(STATE.get("manual") or {}),
                     "video_tools": copy.deepcopy(STATE.get("video_tools") or {}),
                     "content_pipeline": copy.deepcopy(
                         STATE.get("content_pipeline") or {}),
-                    "background_jobs": JOB_MANAGER.snapshot(active_only=True),
-                })
+                }
+            payload["background_jobs"] = JOB_MANAGER.snapshot(active_only=True)
+            # Never keep the state lock while writing to a slow/disconnected UI.
+            return self._json(payload)
 
         if p == "/api/content/list":
             return self._json(*content_api.api_content_list(q))
@@ -191,9 +245,35 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/config":
             try:
                 return self._json({"translation": _translation_cfg_for_gui(),
-                                   "tts": _tts_cfg_for_gui()})
+                                   "tts": _tts_cfg_for_gui(),
+                                   "content_pipeline": _content_pipeline_cfg_for_gui(),
+                                   "dang_youtube": _dang_youtube_cfg_for_gui(),
+                                   "nvidia_catalog": _nvidia_catalog_for_gui()})
             except Exception as e:
                 return self._json({"error": str(e)}, 500)
+
+        if p == "/api/caption_review":
+            jid = int(q.get("id", [0])[0] or 0)
+            job = _find(jid)
+            if not job:
+                return self._json({"error": "no job"}, 404)
+            from .review import review_for_job
+            from ..asr.nonspeech import load_non_speech
+            state = review_for_job(job, get_project(jid))
+            root = state['review_dir']
+            gaps = [dict(start=r['start'],end=r['end'],reason=r['reason'],issue_id=r['issue_id'],
+                         blocking=r['blocking'],resolution=r['resolution'])
+                    for r in state['items'] if r['requires_review']]
+            remaining = [dict(start=r['start'],end=r['end'],reason=r['reason'],issue_id=r['issue_id'])
+                         for r in state['effective_blockers']]
+            return self._json({
+                **{k:v for k,v in state.items() if k not in {'anchor'}},
+                "ok": True, "review_dir": root,
+                "source_srt": os.path.join(root,'source.srt') if root else '',
+                "gaps": gaps, "acked": load_non_speech(state['anchor']) if state['anchor'] else [],
+                "remaining": remaining, "status": job.get('status') or '',
+                "result_status": job.get('result_status') or '',
+            })
 
         if p == "/api/project":
             jid = int(q.get("id", [0])[0] or 0)
@@ -211,6 +291,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/preview":
             jid = int(q.get("id", [0])[0] or 0)
             t = float(q.get("t", ["0"])[0] or 0)
+            if not math.isfinite(t) or t < 0:
+                raise ValueError("Thời điểm xem trước phải là số hữu hạn không âm.")
             try:
                 out = os.path.join(HERE, "output", "_preview", f"p{jid}.png")
                 os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -288,6 +370,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------- POST ----------------
     def do_POST(self):
+        return self._dispatch(self._post)
+
+    def _post(self):
         p = urllib.parse.urlparse(self.path).path
         b = self._body()
 
@@ -335,14 +420,31 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/config":
             try:
                 tr = b.get("translation") if isinstance(b, dict) else {}
-                if not isinstance(tr, dict):
+                cp = b.get("content_pipeline") if isinstance(b, dict) else None
+                yt = b.get("dang_youtube") if isinstance(b, dict) else None
+                if tr is not None and not isinstance(tr, dict):
                     return self._json({"error": "translation must be an object"}, 400)
-                return self._json({"ok": True,
-                                   "translation": _save_translation_cfg(tr)})
+                if cp is not None and not isinstance(cp, dict):
+                    return self._json({"error": "content_pipeline must be an object"}, 400)
+                if yt is not None and not isinstance(yt, dict):
+                    return self._json({"error": "dang_youtube must be an object"}, 400)
+                saved_tr = _save_translation_cfg(tr or {})
+                saved_cp = (_save_content_pipeline_cfg(cp)
+                            if isinstance(cp, dict) else
+                            _content_pipeline_cfg_for_gui())
+                saved_yt = (_save_dang_youtube_cfg(yt)
+                            if isinstance(yt, dict) else
+                            _dang_youtube_cfg_for_gui())
+                return self._json({"ok": True, "translation": saved_tr,
+                                   "content_pipeline": saved_cp,
+                                   "dang_youtube": saved_yt})
             except Exception as e:
                 return self._json({"error": str(e)}, 400)
 
         if p == "/api/queue/add":
+            for key in ("path", "url"):
+                if b.get(key) is not None and not isinstance(b[key], str):
+                    raise ValueError(f"{key} phải là chuỗi.")
             path = (b.get("path") or "").strip().strip('"')
             raw_url = (b.get("url") or "").strip()
             if raw_url:
@@ -352,6 +454,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "Không thấy URL hợp lệ. Hãy dán riêng link bắt đầu bằng http:// hoặc https://."}, 400)
             else:
                 url = ""
+            jid = None
+            previous_selected = STATE["selected"]
             try:
                 if url:
                     with _LOCK:
@@ -409,6 +513,7 @@ class Handler(BaseHTTPRequestHandler):
                                 cookies_file=cfg.get("cookies_file"),
                                 concurrent_fragments=cfg.get("concurrent_fragments", 8),
                                 external_downloader=cfg.get("external_downloader", "auto"),
+                                proxy=cfg.get("proxy"),
                                 progress_callback=_download_progress)
                             if not downloaded or not os.path.isfile(downloaded):
                                 raise RuntimeError(f"Không thấy file sau khi tải: {downloaded}")
@@ -457,15 +562,24 @@ class Handler(BaseHTTPRequestHandler):
                 get_project(jid)
                 return self._json({"ok": True, "id": jid})
             except Exception as e:
+                if jid is not None:
+                    with _LOCK:
+                        STATE["queue"] = [j for j in STATE["queue"] if j["id"] != jid]
+                        PROJECTS.pop(jid, None)
+                        if STATE["selected"] == jid:
+                            STATE["selected"] = previous_selected
                 return self._json({"error": str(e)}, 500)
 
         if p == "/api/queue/add_batch":
             urls = b.get("urls", [])
             if isinstance(urls, str):
                 urls = [u.strip() for u in urls.split("\n") if u.strip()]
+            if not isinstance(urls, list) or not all(isinstance(u, str) for u in urls):
+                raise ValueError("urls phải là danh sách các chuỗi URL.")
             from ..downloader import extract_url
             results = []
             for raw in urls:
+                jid = None
                 url = extract_url(raw)
                 if not url:
                     results.append({"url": raw, "error": "URL không hợp lệ"})
@@ -518,6 +632,7 @@ class Handler(BaseHTTPRequestHandler):
                                 cookies_file=cfg.get("cookies_file"),
                                 concurrent_fragments=cfg.get("concurrent_fragments", 8),
                                 external_downloader=cfg.get("external_downloader", "auto"),
+                                proxy=cfg.get("proxy"),
                                 progress_callback=_download_progress)
                             if not downloaded or not os.path.isfile(downloaded):
                                 raise RuntimeError(f"Không thấy file sau khi tải: {downloaded}")
@@ -551,6 +666,10 @@ class Handler(BaseHTTPRequestHandler):
                             queued["background_job_id"] = background_job_id
                     results.append({"url": url, "id": jid, "ok": True})
                 except Exception as e:
+                    if jid is not None:
+                        with _LOCK:
+                            STATE["queue"] = [j for j in STATE["queue"] if j["id"] != jid]
+                            PROJECTS.pop(jid, None)
                     results.append({"url": raw, "error": str(e)})
             return self._json({"ok": True, "results": results})
 
@@ -580,6 +699,13 @@ class Handler(BaseHTTPRequestHandler):
             pr = get_project(jid)
             if not pr:
                 return self._json({"error": "no project"}, 404)
+            for key in ("options", "sub_style", "logo"):
+                if key in b and not isinstance(b[key], dict) and not (key == "logo" and b[key] is None):
+                    raise ValueError(f"{key} phải là đối tượng JSON.")
+            for key in ("regions", "segments"):
+                if key in b and (not isinstance(b[key], list) or
+                                 not all(isinstance(row, dict) for row in b[key])):
+                    raise ValueError(f"{key} phải là danh sách đối tượng JSON.")
             with _LOCK:
                 for k in ("regions", "logo", "sub_style", "segments", "options"):
                     if k in b:
@@ -596,12 +722,15 @@ class Handler(BaseHTTPRequestHandler):
             j = _find(jid)
             if not j:
                 return self._json({"error": "no job"}, 404)
+            video_path = str(j.get("path") or "").strip()
+            if not video_path or not os.path.isfile(video_path):
+                return self._json({"error": "Video chưa tải xong, không dò được phụ đề cứng."}, 400)
             with _LOCK:
                 if STATE["busy"]:
                     return self._json({"error": "Đang bận: " + STATE["busy"]}, 409)
                 STATE["busy"] = "Đang dò vùng sub cứng…"
 
-            def _work(job_id=jid, path=j["path"]):
+            def _work(job_id=jid, path=video_path):
                 try:
                     r = detect.detect_hardsub_region(path)
                     pr = get_project(job_id)
@@ -643,6 +772,9 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/story/generate_and_run":
             return self._json(*manual_api.api_story_generate_and_run(b))
 
+        if p == "/api/youtube/login_chatgpt":
+            return self._json(*manual_api.api_login_chatgpt(b))
+
         if p == "/api/story/resume_images":
             return self._json(*manual_api.api_story_resume_images(b))
 
@@ -682,18 +814,112 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/manual/mux":
             return self._json(*manual_api.api_manual_mux(b))
 
+        if p == "/api/caption_review/ack":
+            jid = int(b.get("id") or 0)
+            ranges = b.get("ranges") if isinstance(b.get("ranges"), list) else []
+            resume = bool(b.get("continue_pipeline") or b.get("continue"))
+            with _LOCK:
+                if STATE["running"] or STATE.get("busy"):
+                    return self._json({"error": "Đang xử lý; chờ tác vụ dừng trước khi xác nhận."}, 409)
+                result = ack_caption_review(jid, ranges, continue_pipeline=resume)
+            code = int(result.pop("code", 200) or 200)
+            if not result.get("ok"):
+                return self._json(result, code if code >= 400 else 400)
+            if resume and result.get("continue_pipeline"):
+                with _LOCK:
+                    if STATE["running"]:
+                        return self._json({"error": "Đang chạy việc khác"}, 409)
+                    queued = _find(jid)
+                    if not queued:
+                        return self._json({"error": "no job"}, 404)
+                    video_path = str(queued.get("path") or "").strip()
+                    if not video_path or not os.path.isfile(video_path):
+                        return self._json(
+                            {"error": "Video chưa tải xong, không chạy được lồng tiếng."},
+                            400)
+                    STATE["running"] = True
+                try:
+                    background_job_id = submit_job(
+                        run_pipeline, name="Pipeline lồng tiếng", resource="ffmpeg",
+                        metadata={"kind": "dub_pipeline", "queue_id": jid},
+                        args=(jid, ["translate", "tts", "render"]))
+                except Exception:
+                    with _LOCK:
+                        STATE["running"] = False
+                    raise
+                with _LOCK:
+                    queued = _find(jid)
+                    if queued:
+                        queued["background_job_id"] = background_job_id
+                result["started"] = True
+                result["steps"] = ["translate", "tts", "render"]
+            return self._json(result)
+
+        if p == "/api/caption_review/rerecognize":
+            jid = int(b.get("id") or 0)
+            try:
+                start = float(b.get("start"))
+                end = float(b.get("end"))
+            except (TypeError, ValueError):
+                return self._json({"error": "Thiếu mốc start/end."}, 400)
+            if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+                return self._json({"error": "Khoảng thời gian không hợp lệ."}, 400)
+            with _LOCK:
+                if STATE["running"] or STATE.get("busy"):
+                    return self._json({"error": "Đang chạy việc khác"}, 409)
+                queued = _find(jid)
+                if not queued:
+                    return self._json({"error": "no job"}, 404)
+                video_path = str(queued.get("path") or "").strip()
+                if not video_path or not os.path.isfile(video_path):
+                    return self._json(
+                        {"error": "Video chưa tải xong, không nhận dạng lại được."},
+                        400)
+                STATE["running"] = True
+            try:
+                background_job_id = submit_job(
+                    rerecognize_caption_gap, name="Nhận dạng lại đoạn",
+                    resource="ffmpeg",
+                    metadata={"kind": "asr_rerecognize", "queue_id": jid},
+                    args=(jid, start, end))
+            except Exception:
+                with _LOCK:
+                    STATE["running"] = False
+                raise
+            with _LOCK:
+                queued = _find(jid)
+                if queued:
+                    queued["background_job_id"] = background_job_id
+            return self._json({"ok": True, "started": True})
+
         if p == "/api/run":
+            jid = int(b.get("id", 0))
+            steps = b.get("steps") or ["asr", "translate", "tts", "render"]
+            if (not isinstance(steps, list) or
+                    any(step not in ("asr", "translate", "tts", "sync_check", "render")
+                        for step in steps)):
+                raise ValueError("steps chỉ nhận asr, translate, tts, sync_check, render.")
             with _LOCK:
                 if STATE["running"]:
                     return self._json({"error": "Đang chạy việc khác"}, 409)
-            jid = int(b.get("id", 0))
-            steps = b.get("steps") or ["asr", "translate", "tts", "render"]
-            if not _find(jid):
-                return self._json({"error": "no job"}, 404)
-            background_job_id = submit_job(
-                run_pipeline, name="Pipeline lồng tiếng", resource="ffmpeg",
-                metadata={"kind": "dub_pipeline", "queue_id": jid},
-                args=(jid, steps))
+                queued = _find(jid)
+                if not queued:
+                    return self._json({"error": "no job"}, 404)
+                video_path = str(queued.get("path") or "").strip()
+                if not video_path or not os.path.isfile(video_path):
+                    return self._json(
+                        {"error": "Video chưa tải xong, không chạy được lồng tiếng."},
+                        400)
+                STATE["running"] = True
+            try:
+                background_job_id = submit_job(
+                    run_pipeline, name="Pipeline lồng tiếng", resource="ffmpeg",
+                    metadata={"kind": "dub_pipeline", "queue_id": jid},
+                    args=(jid, steps))
+            except Exception:
+                with _LOCK:
+                    STATE["running"] = False
+                raise
             with _LOCK:
                 queued = _find(jid)
                 if queued:
@@ -754,6 +980,13 @@ class Handler(BaseHTTPRequestHandler):
 
         if p == "/api/cancel":
             requested_job_id = str(b.get("job_id") or "")
+            if requested_job_id:
+                # A stale per-job button must never fall back to global cancel.
+                cancelled = JOB_MANAGER.cancel(requested_job_id)
+                if cancelled:
+                    cancel_running_processes(JOB_MANAGER.get_cancel_event(requested_job_id))
+                return self._json({"ok": True, "active": cancelled,
+                                   "cancelled_jobs": [requested_job_id] if cancelled else []})
             selected_id = 0
             with _LOCK:
                 was_running = bool(STATE["running"] or STATE["busy"] or

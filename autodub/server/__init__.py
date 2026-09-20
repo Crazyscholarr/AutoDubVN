@@ -6,6 +6,7 @@ trong trình duyệt sẵn có. Không cài thêm .exe nào -> không bị Devic
 API chính:
     GET  /                     giao diện
     GET  /api/state            trạng thái hàng đợi + tiến độ
+    GET  /api/caption_review   đoạn phụ đề Trung bị chặn (cần kiểm tra)
     POST /api/queue/add        {path} hoặc {url}
     POST /api/queue/remove     {id}
     GET  /api/project?id=      dự án (vùng phủ, kiểu phụ đề, các dòng)
@@ -14,6 +15,8 @@ API chính:
     POST /api/detect_sub       {id} tự dò vùng sub cứng
     GET  /api/preview?id=&t=   khung hình đã áp 3 lớp (PNG)
     POST /api/run              {id, steps:[...]} chạy pipeline
+    POST /api/caption_review/ack  xác nhận đoạn tạp âm, không phải thoại
+    POST /api/caption_review/rerecognize  nhận dạng lại một đoạn (cắt nhỏ ~12s)
     POST /api/cancel
 
 Gói này từng là MỘT file server.py ~2.700 dòng; nay tách theo trách nhiệm:
@@ -41,11 +44,14 @@ from .helpers import (_safe_path_stem, _output_stem_for_video,
 from .config_api import (_load_cfg, _TRANSLATION_GUI_KEYS,
                          _translation_cfg_for_gui, _tts_cfg_for_gui,
                          _yaml_scalar, _save_translation_cfg,
+                         _content_pipeline_cfg_for_gui,
+                         _save_content_pipeline_cfg,
                          _translation_api_params, _test_translation_api)
 from .projects import (PROJECT_STATE_KEYS, default_project, get_project,
                        _project_state_path, _load_project_state,
                        _save_project_state, _segments_from_project,
                        _split_project_vi_on_punctuation, _polish_project_vi,
+                       _finalize_project_vi,
                        _split_project_src_on_punctuation,
                        _prepare_project_src_for_translation,
                        _load_existing_segments_into_project,

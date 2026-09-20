@@ -94,6 +94,33 @@ def start_file_log(path: str, append: bool = False) -> bool:
         return False
 
 
+def start_process_log(path: str) -> bool:
+    """Ghi log lần chạy mới; giữ file cũ bằng cách đổi tên theo mốc thời gian.
+
+    `path` (ví dụ stem.quy_trinh.log) luôn là bản mới nhất để GUI theo dõi.
+    """
+    archived = None
+    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+        root, ext = os.path.splitext(path)
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(os.path.getmtime(path)))
+        archived = f"{root}.{stamp}{ext or '.log'}"
+        n = 1
+        while os.path.exists(archived):
+            archived = f"{root}.{stamp}-{n}{ext or '.log'}"
+            n += 1
+        current = get_file_log_path()
+        if current and os.path.abspath(current) == os.path.abspath(path):
+            stop_file_log()
+        try:
+            os.replace(path, archived)
+        except OSError:
+            archived = None
+    ok = start_file_log(path, append=False)
+    if ok and archived:
+        log(f"Đã lưu nhật ký lần chạy trước: {os.path.basename(archived)}", "info")
+    return ok
+
+
 def get_file_log_path() -> Optional[str]:
     return _LOG_FILE
 
@@ -187,6 +214,28 @@ def active_cancel_event(resource: str = ""):
     return _CANCEL_EVENT
 
 
+def raise_if_cancelled(message: str = "Đã hủy tác vụ") -> None:
+    event = active_cancel_event()
+    if event is not None and getattr(event, "is_set", lambda: False)():
+        raise InterruptedError(message)
+
+
+def wait_or_cancel(seconds: float, message: str = "Đã hủy tác vụ",
+                   sleeper=None) -> None:
+    """Chờ; nếu đang hủy thì dừng trước và sau nhịp chờ.
+
+    Dùng sleeper (mặc định time.sleep) để test mock được backoff 429. Hủy giữa
+    lúc HTTP đang mở do `_urlopen_deadline`; hủy giữa backoff có hiệu lực khi
+    nhịp sleep hiện tại kết thúc.
+    """
+    seconds = max(0.0, float(seconds or 0.0))
+    raise_if_cancelled(message)
+    pause = sleeper or time.sleep
+    if seconds:
+        pause(seconds)
+    raise_if_cancelled(message)
+
+
 def register_running_process(proc, cancel_event=None, resource: str = ""):
     owner = cancel_event if cancel_event is not None else active_cancel_event(resource)
     with _RUN_LOCK:
@@ -226,6 +275,7 @@ def run(cmd: List[str], check: bool = True, quiet: bool = True,
         line_callback: Optional[Callable[[str], None]] = None,
         heartbeat_callback: Optional[Callable[[float], None]] = None,
         heartbeat_interval: float = 15.0,
+        health_check: Optional[Callable[[], None]] = None,
         ) -> subprocess.CompletedProcess:
     """Chạy lệnh ngoài (ffmpeg/ffprobe...) một cách AN TOÀN cho app cửa sổ.
 
@@ -276,6 +326,13 @@ def run(cmd: List[str], check: bool = True, quiet: bool = True,
             chunks = []
             reader_finished = False
             while not reader_finished:
+                if health_check is not None:
+                    try:
+                        health_check()
+                    except Exception:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                        raise
                 if owner_cancel_event is not None and owner_cancel_event.is_set():
                     try:
                         proc.terminate()
@@ -483,6 +540,8 @@ def ffprobe_duration(path: str) -> float:
             "-of", "json", path,
         ], check=False, timeout=60)
         return float(json.loads(res.stdout or "{}")["format"]["duration"])
+    except InterruptedError:
+        raise
     except Exception:
         return 0.0
 

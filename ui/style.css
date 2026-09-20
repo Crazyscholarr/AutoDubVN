@@ -93,6 +93,22 @@ select.inp{background:var(--panel2);border:1px solid var(--line);border-radius:8
 .qdot.run{background:var(--accent);box-shadow:0 0 7px var(--accent)}
 .qdot.done{background:var(--green)}
 .qdot.err{background:var(--red)}
+.qdot.warn{background:var(--amber);box-shadow:0 0 7px rgba(245,158,11,.55)}
+.qitem.review{border-color:#70561b;background:rgba(245,158,11,.06)}
+.review-card{margin:0 0 12px;padding:10px 11px;border:1px solid #70561b;border-radius:8px;background:#241d0d}
+.review-card .sect{color:#ffd88a;padding:0 0 6px}
+.review-gaps{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+.review-gap{display:flex;flex-direction:column;gap:6px;width:100%;text-align:left;padding:8px 10px;border-radius:7px;border:1px solid #735918;background:#352a0e;color:#ffd88a}
+.review-gap.acked{border-color:#3d6a3a;background:#16301c;color:#b7e0c0}
+.review-seek{display:flex;flex-direction:column;gap:2px;width:100%;text-align:left;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}
+.review-gap:hover{border-color:#f5b942}
+.review-gap.acked:hover{border-color:#5aa85a}
+.review-gap b{font-size:12px;color:#ffe7b0}
+.review-gap.acked b{color:#d4f3d8}
+.review-gap span{font-size:11px;color:#e8d7a8;line-height:1.35}
+.review-gap em{font-style:normal;font-size:10px;color:#f5c14a}
+.review-gap-actions{display:flex;gap:6px;flex-wrap:wrap}
+.review-gap-actions .btn{flex:1;min-width:132px;text-align:center}
 .qname{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
 .qbar{height:3px;background:#1b2531;border-radius:3px;margin-top:8px;overflow:hidden}
 .qbar i{display:block;height:100%;background:var(--accent);width:0;transition:.3s}
@@ -114,23 +130,31 @@ select.inp{background:var(--panel2);border:1px solid var(--line);border-radius:8
 #stage{flex:1;background:#070b10;border:1px solid var(--line);border-radius:var(--r);
   position:relative;overflow:hidden;display:flex;align-items:center;justify-content:center;min-height:0}
 #vwrap{position:relative;line-height:0}
-#video{display:block;max-width:100%;max-height:100%;background:#000}
+#video{display:block;max-width:100%;max-height:100%;background:#000;pointer-events:none}
 #empty{color:#3f5163;font-size:13px;text-align:center;padding:30px}
 #empty b{display:block;color:#55697e;font-size:15px;margin-bottom:6px}
-#layers{position:absolute;inset:0;pointer-events:none}
+#layers{position:absolute;inset:0;z-index:3;pointer-events:auto;touch-action:none;cursor:pointer}
+/* Editor hit priority: logo > subtitles > blur, newest region first.
+   #layers is the hit plane. Empty space still toggles play via the vwrap click
+   handler; the center Play control is visual-only and must not steal pointers. */
+#layers .box.blur,#layers .box.delogo{z-index:1}
+#layers .box.sub{z-index:2}
+#layers .box.logo{z-index:3}
+#layers .logo-image{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 
 .box{position:absolute;pointer-events:auto;cursor:move;box-sizing:border-box;
-  transition:box-shadow .12s, border-color .12s;touch-action:none}
+  transition:box-shadow .12s, border-color .12s;touch-action:none;z-index:1}
 .box:hover{box-shadow:0 0 0 1px rgba(255,255,255,.22)}
 /* vùng bắt tay nắm rộng hơn phần nhìn thấy -> dễ tóm, không phải nhắm chuẩn */
 .box .h::before{content:"";position:absolute;inset:-8px}
 .box .tag{position:absolute;top:-19px;left:-1px;font-size:10px;padding:1px 6px;
   border-radius:4px 4px 0 0;white-space:nowrap;line-height:16px}
 .box .rm{position:absolute;top:-19px;right:-1px;width:17px;height:17px;font-size:12px;
-  line-height:15px;text-align:center;border-radius:4px;background:#1b2531;color:#8fa3b8}
+  line-height:15px;text-align:center;border-radius:4px;background:#1b2531;color:#8fa3b8;z-index:6;pointer-events:auto}
 .box .rm:hover{background:var(--red);color:#fff}
 .box .h{position:absolute;width:11px;height:11px;background:#fff;border-radius:3px;
-  box-shadow:0 0 0 1.5px rgba(0,0,0,.55);transition:transform .1s}
+  box-shadow:0 0 0 1.5px rgba(0,0,0,.55);transition:transform .1s;
+  pointer-events:auto;z-index:4}
 .box .h:hover{transform:scale(1.35)}
 .box.blur{border:2px solid var(--red);background:rgba(244,63,94,.07)}
 .box.blur .tag{background:var(--red);color:#fff}
@@ -206,6 +230,14 @@ select.inp{background:var(--panel2);border:1px solid var(--line);border-radius:8
 .sw{display:flex;gap:8px}
 .sw i{width:34px;height:30px;border-radius:8px;border:2px solid var(--line);cursor:pointer;display:block}
 .sw i.on{border-color:var(--accent);box-shadow:0 0 0 2px rgba(34,211,238,.22)}
+.sub-color-palette{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px;margin:4px 0 10px}
+.sub-color-swatch{height:28px;min-width:0;border:2px solid var(--line);border-radius:7px;cursor:pointer}
+.sub-color-swatch.on{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent)}
+.sub-color-swatch:focus-visible{outline:2px solid var(--text);outline-offset:3px}
+.sub-custom-color{display:flex;align-items:center;gap:8px}
+.sub-custom-color input[type=color]{width:42px;min-width:42px;height:34px;padding:2px;cursor:pointer}
+.sub-custom-color input[type=text]{min-width:0;flex:1;font-family:Consolas,monospace;text-transform:uppercase}
+.sub-custom-color span{color:var(--muted);font-size:11px}
 .g9{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:13px}
 .g9 button{height:31px;background:var(--panel2);border:1px solid var(--line);border-radius:7px}
 .g9 button::after{content:"";display:block;width:5px;height:5px;border-radius:50%;
@@ -743,10 +775,11 @@ body[data-mode="story"] #top .selwrap,body[data-mode="story"] #top .top-chip:not
 .modal-close{margin-left:auto;color:#94a6be;font-size:28px;line-height:1;width:34px;height:34px;border-radius:8px}
 .modal-close:hover{background:#152238;color:#fff}
 .settings-tabs{display:flex;background:#0d1728;border-bottom:1px solid #20324c;padding:0 24px}
-.settings-tabs button{flex:1;height:44px;color:#91a3bc;border-bottom:2px solid transparent;font-weight:600;font-size:11.5px}
+.settings-tabs button{flex:1;height:44px;color:#91a3bc;border-bottom:2px solid transparent;font-weight:600;font-size:10.5px;padding:0 8px}
 .settings-tabs button.on{color:#20e0ef;border-color:#0bd7ea;background:linear-gradient(0deg,rgba(8,211,232,.06),transparent)}
 .settings-body{min-height:310px;overflow-y:auto;padding:25px;background:#101a2d}
 .settings-group{display:grid;gap:15px}
+.settings-group + .settings-group{margin-top:18px}
 .settings-body .fld input,.settings-body .fld select{height:36px}
 .ready-line{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid #087353;border-radius:9px;background:#073126;color:#08e1ac}
 .ready-line>span{font-size:18px}.ready-line div{display:flex;flex-direction:column}.ready-line small{color:#8fb8aa}
@@ -909,24 +942,27 @@ body[data-mode="story"] #top .selwrap,body[data-mode="story"] #top .top-chip:not
   line-height: 1.6;
 }
 
-/* ============ PLAY OVERLAY trên video ============ */
+/* ============ PLAY OVERLAY trên video ============
+   Visual only. A fullscreen wrapper with pointer-events:auto on the 64px
+   button stole subtitle/blur/logo drags while paused (button sits on the
+   default subtitle). Empty-video play/pause is handled by #vwrap click. */
 #playOverlay{
-  position:absolute;inset:0;z-index:6;
+  position:absolute;inset:0;z-index:1;
   display:flex;align-items:center;justify-content:center;
-  cursor:pointer;pointer-events:auto;
-  background:rgba(0,0,0,.25);transition:opacity .2s,background .2s;
+  pointer-events:none;transition:opacity .2s;
 }
-#playOverlay span{
+#playOverlay button{
   display:grid;place-items:center;
   width:64px;height:64px;border-radius:50%;
   background:rgba(11,200,238,.85);color:#00151c;
-  font-size:26px;line-height:1;padding-left:4px;
+  font-size:26px;line-height:1;padding:0 0 0 4px;border:0;cursor:pointer;
+  pointer-events:none;
   box-shadow:0 6px 24px rgba(0,200,220,.35);
   transition:transform .18s,box-shadow .18s;
 }
-#playOverlay:hover span{transform:scale(1.12);box-shadow:0 8px 32px rgba(0,200,220,.5)}
+#playOverlay button:hover{transform:scale(1.12);box-shadow:0 8px 32px rgba(0,200,220,.5)}
 #playOverlay.playing{opacity:0;pointer-events:none;background:transparent}
-#playOverlay.playing span{transform:scale(.8)}
+#playOverlay.playing button{transform:scale(.8);pointer-events:none}
 /* Click vào vùng trống trong video = play/pause */
 #vwrap{cursor:pointer}
 
@@ -935,7 +971,7 @@ body[data-mode="story"] #top .selwrap,body[data-mode="story"] #top .top-chip:not
   box-shadow:0 0 0 2px rgba(0,0,0,.55),0 0 8px rgba(255,255,255,.12);
   transition:transform .12s,box-shadow .12s}
 .box .h:hover{transform:scale(1.4);box-shadow:0 0 0 2px rgba(0,0,0,.55),0 0 14px rgba(34,211,238,.5)}
-.box .h::before{inset:-12px}
+.box .h::before{inset:calc(-1 * var(--handle-slop,12px))}
 .h.nw{left:-7px;top:-7px}.h.ne{right:-7px;top:-7px}
 .h.sw{left:-7px;bottom:-7px}.h.se{right:-7px;bottom:-7px}
 .h.n{top:-7px;margin-left:-7px}.h.s{bottom:-7px;margin-left:-7px}
@@ -983,6 +1019,15 @@ body[data-mode="story"] #top .selwrap,body[data-mode="story"] #top .top-chip:not
   border-left-color:#0bd5e9;
   color:#20e2f1;
   font-weight:700;
+}
+.tab-item.need-review{
+  color:#ffd88a;
+  border-left-color:#f5b942;
+}
+.tab-item.need-review.on{
+  background:linear-gradient(100deg,rgba(245,177,66,.16),rgba(245,158,11,.06));
+  border-left-color:#f5b942;
+  color:#ffe7b0;
 }
 .tab-item.on .tab-icon{
   color:#0bd5e9;

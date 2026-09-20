@@ -97,16 +97,30 @@ def _fmt_span_time(seconds: float) -> str:
     return f"{h:02d}h{m:02d}m{s:02d}s"
 
 
+def _fmt_span_range(start: float, end: float) -> str:
+    """Keep sub-second review spans from collapsing to the same rounded clock."""
+    left, right = _fmt_span_time(start), _fmt_span_time(end)
+    if left != right or float(end or 0) - float(start or 0) <= 0.001:
+        return f"{left}–{right}"
+
+    def _tenths(value: float) -> str:
+        value = max(0.0, float(value or 0.0))
+        whole = int(value)
+        h, rem = divmod(whole, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h:02d}h{m:02d}m{s:02d}.{int((value - whole) * 10):01d}s"
+
+    return f"{_tenths(start)}–{_tenths(end)}"
+
+
 def _find_existing_dub_audio(tmp_dir: str) -> Optional[str]:
-    names = ["dub.wav", "dub.flac", "dub.mka", "dub.m4a", "dub.aac"]
-    candidates = []
+    names = ["dub.picture.wav", "dub.picture.flac", "dub.wav", "dub.flac",
+             "dub.mka", "dub.m4a", "dub.aac"]
     for name in names:
         path = os.path.join(tmp_dir, name)
         if os.path.exists(path) and os.path.getsize(path) > 512:
-            candidates.append(path)
-    if not candidates:
-        return None
-    return max(candidates, key=lambda p: os.path.getmtime(p))
+            return path
+    return None
 
 
 def _path_under(parent: str, path: str) -> bool:
@@ -119,7 +133,11 @@ def _path_under(parent: str, path: str) -> bool:
 
 
 def _cleanup_temp_files() -> Dict:
-    """Delete regeneratable files in output/**/_tmp without touching final outputs."""
+    """Delete regeneratable render/TTS scratch in output/**/_tmp.
+
+    Keep ASR 16 kHz extracts (audio16k.*) and FunASR chunk checkpoints.
+    Rebuilding those costs minutes and busts the SHA256-keyed raw cache.
+    """
     root = os.path.abspath(os.path.join(HERE, "output"))
     removed = 0
     removed_bytes = 0
@@ -128,7 +146,7 @@ def _cleanup_temp_files() -> Dict:
         return {"files": 0, "bytes": 0, "failed": [], "free": 0}
 
     targets: List[str] = []
-    audio_names = {"audio16k.wav", "audio16k.flac", "dub.wav", "dub.flac"}
+    audio_names = {"dub.wav", "dub.flac", "dub.picture.wav", "dub.picture.flac"}
     render_exts = {".mp4", ".m4v", ".ts"}
     for dirpath, _dirnames, filenames in os.walk(root):
         if not _path_under(root, dirpath):

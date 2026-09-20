@@ -93,9 +93,9 @@
     <div id="stage">
       <div id="empty"><b>Chưa có video</b>Bấm "Chọn video" hoặc dán link phía trên</div>
       <div id="vwrap" style="display:none">
-        <video id="video" preload="metadata"></video>
+        <video id="video" preload="auto" playsinline></video>
+        <div id="playOverlay"><button type="button" tabindex="-1" onclick="togglePlay()" aria-hidden="true" title="Phát / Tạm dừng">▶</button></div>
         <div id="layers"></div>
-        <div id="playOverlay" onclick="togglePlay()" title="Phát / Tạm dừng"><span>▶</span></div>
       </div>
     </div>
 
@@ -217,27 +217,28 @@
       <aside class="idea-collect-form">
         <section class="idea-source-box">
           <div class="idea-box-title"><span>1</span><div><b>Tìm chuyện theo từ khóa</b><small>Kết quả thật từ website, không chèn dữ liệu mẫu.</small></div></div>
-          <label>Từ khóa Trung gợi ý</label>
+          <label>Từ khóa gợi ý</label>
           <select id="ideaKeywordPreset" class="inp" onchange="ideasChooseKeyword(this.value)">
             <option value="">— Chọn chủ đề hoặc tự gõ bên dưới —</option>
           </select>
           <label>Từ khóa tìm kiếm</label>
-          <input id="ideaOnlineKeyword" class="inp" placeholder="婆媳矛盾 故事" oninput="IDEAS.onlineKeyword=this.value">
-          <div id="ideaKeywordInfo" class="idea-keyword-info">Chọn một từ khóa để xem nghĩa và nhóm chủ đề.</div>
+          <input id="ideaOnlineKeyword" class="inp" placeholder="农村老人 灵异故事" oninput="IDEAS.onlineKeyword=this.value">
+          <div id="ideaKeywordInfo" class="idea-keyword-info">Chọn một từ khóa để xem nghĩa và nhóm chủ đề. Nhóm Tâm linh có nhiều mô-típ (miếu, giỗ, báo mộng, nghĩa địa…).</div>
           <div class="idea-collect-grid">
             <div><label>Nguồn tìm</label><select id="ideaSourceGroup" class="inp" onchange="IDEAS.sourceGroup=this.value">
               <option value="zhihu">Zhihu · truyện Trung (ưu tiên)</option>
+              <option value="spiritual">Tâm linh · dân gian Trung</option>
+              <option value="spiritual_vi">Tâm linh · nguồn Việt</option>
               <option value="chinese_real">Trung · tâm sự/người thật</option>
               <option value="chinese_literary">Trung · văn học gia đình</option>
               <option value="chinese_serial">Trung · truyện dài nhiều tập</option>
+              <option value="chinese_folklore">Trung · dân gian/kinh dị</option>
               <option value="vietnam">Nguồn Việt Nam</option>
               <option value="reddit">Reddit AITA</option>
               <option value="chinese">Tất cả nguồn Trung phù hợp</option>
-              <option value="chinese_folklore">Trung · dân gian/kinh dị</option>
-              <option value="spiritual">Tâm linh · ông bà kể</option>
               <option value="all">Tất cả nguồn phù hợp</option>
             </select></div>
-            <div><label>Số kết quả</label><input id="ideaSearchLimit" class="inp" type="number" min="1" max="50" value="20"></div>
+            <div><label>Số kết quả</label><input id="ideaSearchLimit" class="inp" type="number" min="1" max="50" value="30"></div>
           </div>
           <button class="btn pri idea-main-action" onclick="ideasSearchSources()">⌕ TÌM NGUỒN NỘI DUNG</button>
         </section>
@@ -266,9 +267,11 @@
         <button class="btn" onclick="ideasSample()">Dữ liệu mẫu kiểm thử</button>
         <button class="btn" onclick="ideasSetVisibleSelection(true)">☑ Chọn mục đang lọc</button>
         <button class="btn" onclick="ideasSetVisibleSelection(false)">☐ Bỏ chọn</button>
-        <select id="ideaProvider" class="inp" onchange="IDEAS.provider=this.value">
-          <option value="browser">Gemini Web · local, không API</option>
+        <select id="ideaProvider" class="inp" onchange="setIdeaProvider(this.value)">
+          <option value="browser" selected>Gemini Web · local, không API</option>
           <option value="perplexity_browser">Claude · Perplexity Web, không API</option>
+          <option value="tokenharbor">TokenHarbor · DeepSeek V4 Flash free</option>
+          <option value="nvidia">NVIDIA NIM · Lightning 30B (JSON nhanh)</option>
           <option value="heuristic">Quy tắc local · không mở AI</option>
         </select>
         <select id="ideaUsageFilter" class="inp idea-usage-filter" onchange="ideasSetUsageFilter(this.value)">
@@ -309,6 +312,7 @@
       <button data-settings-tab="api" onclick="setSettingsTab('api')">◎ API Dịch &amp; AI</button>
       <button data-settings-tab="voice" onclick="setSettingsTab('voice')">♬ Giọng Đọc &amp; Audio Ducking</button>
       <button data-settings-tab="gpu" onclick="setSettingsTab('gpu')">▧ GPU NVENC &amp; Xuất Video</button>
+      <button data-settings-tab="youtube" onclick="setSettingsTab('youtube')">▶ YouTube</button>
     </nav>
     <div id="settingsBody" class="settings-body"></div>
     <footer class="settings-foot"><button class="btn" onclick="closeSettings()">Đóng</button>
@@ -318,6 +322,13 @@
 
 <div id="toast"></div>
 
-<script src="/app.js"></script>
+<script src="/js/core.js"></script>
+<script src="/js/dub-queue.js"></script>
+<script src="/js/dub-editor.js"></script>
+<script src="/js/dub-panel.js"></script>
+<script src="/js/dub-run.js"></script>
+<script src="/js/ideas.js"></script>
+<script src="/js/tools.js"></script>
+<script src="/js/story.js"></script>
 </body>
 </html>

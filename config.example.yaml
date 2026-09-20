@@ -6,12 +6,15 @@
 # Để "" nếu ffmpeg đã có sẵn trong PATH. Ví dụ: "D:\\ffmpeg\\bin"
 ffmpeg_dir: ''
 
-download:                          # Khi nhập LINK (Bilibili/YouTube...) thay vì file
+download:                          # Khi nhập LINK (Bilibili/YouTube/Douyin/TikTok...) thay vì file
   quality: best                    # best | 1080 | 720 | 480 | 360
-  concurrent_fragments: 8          # Tải nhiều mảnh video song song. 8 thường nhanh/ổn; mạng mạnh thử 12-16.
+  concurrent_fragments: 8          # YouTube/nguồn khác: 8 mảnh. Bilibili tự hạ còn 4 để tránh CDN nghẽn.
   external_downloader: auto        # auto = downloader nội bộ ổn định | aria2c = ép dùng aria2c | none = tắt tăng tốc
+  # Speedtest trong nước đo máy chủ VN, không phải CDN Bilibili. VNPT hay nghẽn đường TQ.
+  # VPN/Clash node HK-SG rồi điền: proxy: "http://127.0.0.1:7890"
+  proxy: ""
   # Bilibili công khai dùng bộ tải API/CDN trực tiếp, không cần mở trình duyệt.
-  # Cookie chỉ cần khi muốn độ nét/nội dung bị Bilibili khóa sau đăng nhập.
+  # YouTube bot/429: đặt chrome hoặc edge:Default. Douyin cần cookie đã mở douyin.com.
   cookies_from_browser: null       # null | edge:Default | chrome | firefox
   cookies_file: null               # hoặc đường dẫn file cookies.txt
 
@@ -35,18 +38,46 @@ translation:
                                     # Đánh đổi: mỗi lô tốn thêm 1 lượt hỏi nên dịch lâu hơn.
                                     # Đặt false nếu ưu tiên tốc độ hơn độ khớp.
   split_on_punctuation: true       # Tách phụ đề GỐC theo dấu kết câu mạnh: . ? ! 。？！ …
-  merge_source_fragments: true     # Gom mảnh ASR bị cắt giữa ý trước khi dịch: "năng" + "lực", "Nguy" + "Ma"
+  keep_source_timing: true         # Giữ số cue/start/end; câu dịch có thể phủ nhiều cue.
+  semantic_translation: true      # Cùng pipeline cho API (xkiro) và Gemini web (provider: browser)
+  semantic_batch_cues: 10         # 6–30 cue đích; lô nhỏ JSON ít lỗi hơn, dán vừa Gemini web
+  semantic_batch_seconds: 45      # 20–60 giây; batch ngắn hơn ở cuối/ranh giới
+  semantic_context_cues: 2        # 0–5 cue trước/sau, chỉ đọc
+  max_group_gap_ms: 1400          # Không chuyển chữ/đọc liền qua khoảng nghỉ lớn hơn mức này
+  semantic_group_max_cues: 6
+  semantic_group_max_seconds: 20
+  name_policy: han_viet           # han_viet | pinyin | keep_source
+  glossary: {}                    # "七月": {vi: "Thất Nguyệt", type: person, locked: true}
+  glossary_path: ""               # JSON glossary series chỉ đọc; glossary inline được ưu tiên
+  browser_model: "selected-in-browser" # Đổi nhãn này khi đổi model web để vô hiệu semantic cache
+  merge_source_fragments: true     # Chỉ khi TẮT keep_source_timing: gom mảnh ASR trước khi dịch
   source_merge_max_chars: 180      # Tối đa ký tự của 1 câu/ý đưa sang Gemini
   source_merge_min_chars: 24       # Mảnh chưa hết câu ngắn hơn mức này sẽ cố gom với dòng sau
   source_merge_max_gap: 1.2        # Chỉ gom nếu hai mảnh cách nhau không quá số giây này
   source_merge_max_duration: 18.0  # Không gom thành một unit quá dài, trừ mảnh nối cực ngắn
   split_translated_on_punctuation: false # Không tách bản dịch Việt lần hai để tránh voice/sub chạy vụn và nhanh hơn hình.
-  polish_subtitles: true           # Gom mảnh bị cắt ngu, bỏ dấu ba chấm nối câu, rồi chia lại sub Việt theo ý câu
+  polish_subtitles: true           # Chỉ khi TẮT keep_source_timing: gom/chia lại sub Việt theo ý câu
   polish_max_chars: 125            # Dòng dài hơn mức này sẽ ưu tiên tách ở dấu câu thật
   polish_min_chars: 24             # Mảnh quá ngắn sẽ được gom với câu cạnh bên nếu còn vừa
   polish_min_gap: 0.04             # Khoảng hở nhỏ giữa các dòng sau khi chia lại
-  reset_every: 10                  # (browser) Cứ ngần này lượt thì mở đoạn chat mới
-                                    # cho nhẹ ngữ cảnh (Gemini càng dài càng chậm/lạc đề)
+  vi_reflow: true                  # Giữ timestamp gốc, chia lại chữ Việt theo ngữ pháp (tôi / đã...)
+  vi_reflow_max_gap: 0.70          # Ngắt cụm ý nếu hai cue cách nhau hơn số giây này
+  vi_reflow_dangling_gap: 1.15     # Vẫn gom nếu cue trước treo chủ ngữ/liên từ và gap dưới mức này
+  vi_reflow_complete_gap: 0.32     # Cue đã đủ ý + khoảng nghỉ lớn hơn mức này → hết cụm
+  vi_reflow_max_cues: 8            # Không gom quá số cue này thành một câu
+  vi_reflow_max_chars: 240
+  vi_reflow_max_duration: 14.0
+  max_cps: 22.0                    # Trần tốc độ đọc tương đối khi cân độ dài cue
+  min_cue_duration: 0.08
+  max_chars_per_line: 42
+  max_lines_per_cue: 2
+  vi_beautify: false               # auto = cửa sổ ngắt xấu | true = mọi cửa sổ | false = tắt (nhanh hơn)
+  vi_beautify_window: 10           # Số cue mỗi cửa sổ AI chỉnh ngắt
+  vi_beautify_overlap: 2           # Overlap giữa các cửa sổ; cue overlap chỉ sửa một lần
+  vi_beautify_threshold: 8.0       # Điểm ngắt xấu tối thiểu mới gửi AI
+  reset_every: 10                  # (browser) Cứ ngần này lượt thì bấm Chat mới
+                                    # rồi gieo lại khóa LỒNG TIẾNG. Không chỉ reload /app
+                                    # (reload hay khôi phục chat kho ý tưởng -> dịch văn bản).
   gemini_api_key: "YOUR_GEMINI_API_KEY_HERE"              # Không dùng API. Khi provider: browser, chương trình dùng Gemini trong trình duyệt.
   gemini_model: "gemini-3.1-flash"   # Tên model Gemini API stable mới; code tự fallback nếu key chưa được cấp model này
   tokenrouter_api_key: "YOUR_TOKENROUTER_API_KEY_HERE"          # Dien key TokenRouter khi provider: tokenrouter
@@ -62,17 +93,30 @@ translation:
   inferx_model: "deepseek-v4-flash"
   inferx_timeout: 420
   # NVIDIA NIM (build.nvidia.com): key nvapi-... FREE, không cần thẻ, MỘT key
-  # dùng chung cho mọi model trong catalog - đổi model chỉ cần sửa nvidia_model.
-  # MiniMax M3: endpoint free hiện hành cho dịch, phân tích và viết nội dung.
+  # dùng chung cho mọi model. Pro = dịch/viết; Lightning = kho ý tưởng JSON.
   nvidia_api_key: "YOUR_NVIDIA_API_KEY_HERE"
   nvidia_base_url: "https://integrate.api.nvidia.com/v1"
-  nvidia_model: "minimaxai/minimax-m3"
-  nvidia_timeout: 420
+  nvidia_model: "google/gemma-4-31b-it"
+  nvidia_fast_model: "nvidia/nemotron-3-super-120b-a12b"
+  nvidia_timeout: 420              # Gemma 4 dịch; Super dự phòng khi treo / kho ý tưởng
   # ZenMux OpenAI-compatible; model free có thể đổi theo catalog ZenMux.
   zenmux_api_key: ""
   zenmux_base_url: "https://zenmux.ai/api/v1"
-  zenmux_model: "z-ai/glm-5.3-free"
+  zenmux_model: "z-ai/glm-4.7-flash-free"
   zenmux_timeout: 420
+  tokenharbor_api_key: ""
+  tokenharbor_base_url: "https://tokenharbor.ai/v1"
+  tokenharbor_model: "deepseek-v4-flash:free"
+  tokenharbor_timeout: 120
+  xkiro_api_key: ""
+  xkiro_base_url: "https://api.xkiro.com/v1"
+  xkiro_model: "qwen/qwen3.5-flash:free"
+  xkiro_timeout: 120
+  # Z.AI official OpenAI-compatible; GLM-4.7-Flash is the free text model.
+  zai_api_key: ""
+  zai_base_url: "https://api.z.ai/api/paas/v4"
+  zai_model: "glm-4.7-flash"
+  zai_timeout: 120
   male_lead_name: ""               # De trong = khong ep ten nhan vat
   female_lead_name: ""             # De trong = khong ep ten nhan vat
   reuse_existing: true             # Có sẵn file .vi.srt thì dùng lại, khỏi dịch lại
@@ -108,6 +152,18 @@ asr:
   loudnorm: true                   # Chuẩn hoá âm lượng trước khi nhận -> VAD đỡ bỏ sót
   reuse_existing: true             # Có sẵn <tên>.src.srt thì dùng lại cho nhanh. Muốn bốc lại video lỗi thì xoá riêng file .src.srt đó.
 
+  # Cắt phụ đề kiểu CapCut/JianYing (mặc định): mỗi dòng ~8-16 chữ Hán / ~1.8-2.8 giây,
+  # ngắt khi im lặng, ưu tiên dấu câu, KHÔNG đợi hết câu。 SRT CapCut thật: TB 1.8s / 9 chữ.
+  # sentence = gom tới dấu kết câu như trước (dòng dài 5-16s).
+  caption_style: screen            # screen | sentence
+  screen_max_chars: 16
+  screen_min_chars: 4
+  screen_max_duration: 2.8
+  screen_hard_max_chars: 22
+  screen_hard_max_duration: 4.3
+  screen_gap: 0.32                 # Im lặng hơn mức này thì xuống dòng
+  funasr_merge_length_s: 3         # FunASR gộp VAD tối đa N giây (cũ là 15 = câu dài)
+
   # ----- CHỐNG MẤT ĐOẠN (quan trọng với video dài) -----
   rescue_gaps: true                # Tự dò khoảng trống dài rồi nhận diện lại đoạn đó
   min_gap_seconds: 10               # Gap toi thieu (giay) de rescue. 10 bat nhieu doan sot hon 25 cu
@@ -128,14 +184,12 @@ asr:
   #   - Không phân biệt hoa/thường.
   #   - Muốn dùng biểu thức chính quy thì bắt đầu bằng 're:'
   # Sửa xong chạy lại chương trình: file .src.srt cũ cũng được sửa luôn.
-  corrections:
-    "tiểu xoái ta": "tiểu soái ca"
-    "tiểu xoái": "tiểu soái"
+  corrections: {}
   #   "re:\bxoái\b": "soái"
 
   # Gợi ý từ vựng thêm cho ASR (tên nhân vật, địa danh, thuật ngữ trong phim).
   # Càng sát nội dung càng đỡ nghe nhầm. Để null nếu không cần.
-  vocab_hint: null                 # vd: "Giang Tam. Hạo Nguyệt. tiểu soái ca. thần tuyển."
+  vocab_hint: null                 # Điền khi cần gợi ý tên riêng/thuật ngữ.
 
 diarization:
   enabled: false                  # turbo: tat tach nhan vat de nhanh hon
@@ -153,7 +207,10 @@ tts:
   max_speed: 1.6                   # trần tăng tốc; sync strict cần cao hơn để ít phải cắt câu dài
   min_gap: 0.02                    # Khoảng nghỉ tối thiểu giữa 2 câu (giây)
   sync_offset_seconds: 0.0         # Dương = voice/sub Việt xuất hiện trễ hơn hình; âm = sớm hơn.
-  sync_mode: strict                # strict = bám timestamp gốc từng câu, không để drift tích luỹ theo cụm thoại
+  sync_mode: strict                # strict = khóa cứng lời thoại với hình (bám timestamp gốc từng câu)
+  lock_av: true                    # true = luôn strict, kể cả project cũ từng lưu cascade
+                                    # Đồng hồ hình/tiếng: lệch sau ~1 phút rồi càng nặng là PTS hình ≠ audio.
+  max_start_drift_seconds: 5.0     # Trần lệch start nếu tắt khóa (cascade). Strict thì luôn 0.
   trim_overflow: true              # Nếu câu vẫn dài hơn slot dù đã tăng tốc, cắt đuôi clip đó thay vì kéo lệch 20-30s
   max_overhang_seconds: 0.75       # Giọng chỉ được đọc quá `end` của phụ đề tối đa bấy nhiêu giây,
                                     # DÙ phía sau có bao nhiêu im lặng. Trước đây phần mượn im lặng
@@ -303,7 +360,7 @@ video:
   render_chunked: false            # true = chia render video dài thành nhiều phần rồi tự ghép lại
   render_chunk_minutes: 120        # Mỗi phần bao nhiêu phút khi render_chunked=true. 120 = 2 tiếng/phần.
   audio_mix_mode: ffmpeg           # ổn định trên máy bật Application Control/WDAC; không import torch DLL
-  audio_mix_chunk_seconds: 120     # FFmpeg fallback trộn theo mảnh ngắn; tránh sinh WAV trung gian nhiều GB
+  audio_mix_chunk_seconds: 120     # Trộn theo mảnh; mỗi mảnh khóa đúng số mẫu rồi nối copy để không co timeline
   force_h264: false                # turbo: copy codec goc neu khong can render lai
                                     # HEVC/H.265 - Windows Photos KHÔNG mở được
                                     # ("format is currently unsupported"). Đặt false

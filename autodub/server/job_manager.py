@@ -74,7 +74,12 @@ class _BoundedExecutor:
 
     def _worker(self) -> None:
         while True:
-            item = self._queue.get()
+            try:
+                item = self._queue.get(timeout=.1)
+            except queue.Empty:
+                if self._shutdown:
+                    return
+                continue
             try:
                 if item is self._STOP:
                     return
@@ -106,16 +111,16 @@ class _BoundedExecutor:
                                 item[0].cancel()
                         finally:
                             self._queue.task_done()
-                for _ in self._threads:
-                    try:
-                        self._queue.put_nowait(self._STOP)
-                    except queue.Full:
-                        self._queue.put(self._STOP)
+                # Workers observe shutdown when the queue empties. Enqueuing
+                # one sentinel per worker can itself block beyond timeout when
+                # the queue is full (or smaller than the worker count).
             threads = list(self._threads)
         if not wait:
             return not any(thread.is_alive() for thread in threads)
         deadline = time.monotonic() + max(0.0, float(timeout))
         for thread in threads:
+            if thread is threading.current_thread():
+                continue
             remaining = max(0.0, deadline - time.monotonic())
             thread.join(remaining)
         return not any(thread.is_alive() for thread in threads)
@@ -212,15 +217,29 @@ class JobManager:
                 item["finished_at"] = now
                 item["error"] = "Ứng dụng đã đóng trước khi tác vụ hoàn tất."
             self._restored.append(item)
-        self._persist()
 
     def _history_rows(self) -> list[Dict[str, Any]]:
         with self._lock:
+            active_statuses = {"queued", "running", "cancelling"}
+            finished = [key for key, job in self._jobs.items()
+                        if job.status not in active_statuses]
+            for key in finished[:-self.history_limit]:
+                self._jobs.pop(key, None)
             current = [job.public() for job in self._jobs.values()]
-            rows = (self._restored + current)[-self.history_limit:]
+            all_rows = self._restored + current
+            active = [row for row in all_rows if row.get("status") in active_statuses]
+            history = [row for row in all_rows if row.get("status") not in active_statuses]
+            rows = sorted(history[-self.history_limit:] + active,
+                          key=lambda row: row.get("submitted_at", 0))
         return rows
 
     def _persist(self) -> None:
+        # Serialize snapshot + atomic replacement together. Separate writers
+        # sharing jobs.json.tmp could replace/delete each other's snapshots.
+        with self._lock:
+            self._persist_locked()
+
+    def _persist_locked(self) -> None:
         rows = self._history_rows()
         target = self.persist_path
         temp = target + ".tmp"
@@ -240,7 +259,8 @@ class JobManager:
     def submit(self, target: Callable, *, name: str,
                resource: str = "default", foreground: bool = True,
                metadata: Optional[Dict[str, Any]] = None,
-               args: Iterable = (), kwargs: Optional[Dict[str, Any]] = None) -> str:
+               args: Iterable = (), kwargs: Optional[Dict[str, Any]] = None,
+               on_cancel: Optional[Callable[[], None]] = None) -> str:
         resource = resource if resource in self._executors else "default"
         with self._lock:
             if self._shutdown:
@@ -255,6 +275,24 @@ class JobManager:
             )
             self._jobs[job_id] = job
 
+        notified = False
+
+        def cancelled_before_start(future=None):
+            nonlocal notified
+            if future is not None and not future.cancelled():
+                return
+            with self._lock:
+                if notified:
+                    return
+                notified = True
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                self._persist()
+            # GUI cleanup acquires its own lock. Never call it while holding
+            # the manager lock: /api/state takes those locks in reverse order.
+            if on_cancel is not None:
+                on_cancel()
+
         def run_job():
             _LOCAL.job_id = job.id
             _LOCAL.cancel_event = job.cancel_event
@@ -262,26 +300,25 @@ class JobManager:
                 _ACTIVE_BY_RESOURCE.setdefault(job.resource, set()).add(
                     job.cancel_event)
             with self._lock:
-                if job.cancel_event.is_set():
-                    job.status = "cancelled"
-                    job.finished_at = time.time()
+                skipped = job.cancel_event.is_set()
+                if not skipped:
+                    job.status = "running"
+                    job.started_at = time.time()
                     self._persist()
-                    _LOCAL.job_id = ""
-                    _LOCAL.cancel_event = None
-                    with _ACTIVE_LOCK:
-                        active = _ACTIVE_BY_RESOURCE.get(job.resource)
-                        if active is not None:
-                            active.discard(job.cancel_event)
-                            if not active:
-                                _ACTIVE_BY_RESOURCE.pop(job.resource, None)
-                    return None
-                job.status = "running"
-                job.started_at = time.time()
-                self._persist()
             try:
+                if skipped:
+                    cancelled_before_start()
+                    return None
                 result = target(*(tuple(args)), **dict(kwargs or {}))
                 with self._lock:
-                    job.status = "cancelled" if job.cancel_event.is_set() else "completed"
+                    gated = (
+                        isinstance(result, dict)
+                        and result.get("status") in {
+                            "REVIEW_REQUIRED", "SYNC_CHECK_FAILED",
+                        }
+                    )
+                    job.status = ("cancelled" if job.cancel_event.is_set() else
+                                  "review_required" if gated else "completed")
                 return result
             except InterruptedError:
                 with self._lock:
@@ -313,6 +350,7 @@ class JobManager:
                 self._persist()
             raise
         job.future = future
+        future.add_done_callback(cancelled_before_start)
         self._persist()
         return job_id
 
@@ -327,12 +365,12 @@ class JobManager:
             if not job or job.status not in {"queued", "running", "cancelling"}:
                 return False
             job.cancel_event.set()
-            job.status = "cancelling" if job.status == "running" else "cancelled"
-            if job.future is not None and job.future.cancel():
-                job.status = "cancelled"
-                job.finished_at = time.time()
+            job.status = "cancelling"
+            future = job.future
             self._persist()
-            return True
+        if future is not None:
+            future.cancel()
+        return True
 
     def cancel_foreground(self, metadata_key: str = "", metadata_value: Any = None
                           ) -> list[tuple[str, threading.Event]]:
@@ -365,8 +403,6 @@ class JobManager:
 
     def shutdown(self, wait: bool = True, timeout: float = 12.0) -> bool:
         with self._lock:
-            if self._shutdown:
-                return True
             self._shutdown = True
             active = [job for job in self._jobs.values()
                       if job.status in {"queued", "running", "cancelling"}]

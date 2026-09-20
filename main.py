@@ -8,6 +8,7 @@ Quy trình: tách audio -> nhận phụ đề (ASR) -> (tùy chọn tách nhân 
 dịch sang tiếng Việt -> tổng hợp giọng + chống đè thoại -> ghép & render.
 """
 from __future__ import annotations
+from autodub.semantic import copy_metadata, restore_metadata
 
 import os
 import shutil
@@ -21,8 +22,10 @@ from autodub import (srt_utils, asr, translate, tts, video, diarize, downloader,
                      overlays, speechmap)
 from autodub.utils import (log, require, ffprobe_duration, has_nvenc,
                            ffprobe_has_stream, ffprobe_is_blank_video,
-                           ffprobe_video_size, start_file_log, C,
+                           ffprobe_video_size, start_process_log, C,
                            ffmpeg_dir_to_path)
+from autodub.media_clock import (apply_picture_clock, probe_media_clocks,
+                                 sidecar_path)
 
 
 def load_config(path: str) -> dict:
@@ -77,7 +80,7 @@ def load_config(path: str) -> dict:
 
 
 def ask_video_path() -> str:
-    print(f"\n{C.B}==> Nhập đường dẫn video HOẶC link (Bilibili/YouTube...){C.E}")
+    print(f"\n{C.B}==> Nhập đường dẫn video HOẶC link (Bilibili/YouTube/Douyin...){C.E}")
     print(f"{C.DIM}   (kéo-thả file vào cửa sổ, hoặc dán link https://...){C.E}")
     raw = input("   Video/Link: ").strip().strip('"').strip("'")
     return raw
@@ -108,6 +111,7 @@ def main():
             cookies_file=dl.get("cookies_file"),
             concurrent_fragments=dl.get("concurrent_fragments", 8),
             external_downloader=dl.get("external_downloader", "auto"),
+            proxy=dl.get("proxy"),
         )
 
     if not video_path or not os.path.isfile(video_path):
@@ -118,15 +122,24 @@ def main():
     out_dir = os.path.join(here, cfg["output"]["dir"], stem)
     tmp_dir = os.path.join(out_dir, "_tmp")
     clips_dir = os.path.join(tmp_dir, "clips")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        os.mkdir(tmp_dir)
+        owns_tmp_dir = True
+    except FileExistsError:
+        owns_tmp_dir = False
     os.makedirs(clips_dir, exist_ok=True)
+    from autodub.asr.nonspeech import bind_source
+    review_context = bind_source(tmp_dir, video_path)
 
     try:
         # Ghi lại TOÀN BỘ nhật ký lần chạy này ra file để xem lại / gửi khi có lỗi.
         log_path = os.path.join(out_dir, f"{stem}.quy_trinh.log")
-        if start_file_log(log_path):
+        if start_process_log(log_path):
             log(f"Nhật ký phiên chạy được lưu vào: {log_path}", "info")
 
         src_srt = os.path.join(out_dir, f"{stem}.src.srt")
+        asr_srt = os.path.join(out_dir, f"{stem}.asr.srt")
         vi_srt = os.path.join(out_dir, f"{stem}.vi.srt")
         dub_wav = os.path.join(tmp_dir, "dub.wav")
         audio_wav = os.path.join(tmp_dir, "audio16k.wav")
@@ -135,13 +148,20 @@ def main():
         final_out = os.path.join(out_dir, f"{stem}{suffix}.mp4")
 
         t0 = time.time()
-        duration = ffprobe_duration(video_path)
+        clocks = probe_media_clocks(video_path)
+        duration = float(clocks.get("picture_duration") or 0.0) or ffprobe_duration(video_path)
         if duration <= 0:
             log(f"Không đọc được thời lượng video (file hỏng?): {video_path}", "err")
             log("Nếu tiếp tục, mọi mốc thời gian sẽ bị kẹp về 0 và cả track thoại "
                 "chồng lên nhau - nên dừng ngay tại đây.", "err")
             return 1
+        scale = float(clocks.get("time_scale") or 1.0)
         log(f"Video: {stem}  |  dài {duration/60:.1f} phút  |  NVENC: {'CÓ' if has_nvenc() else 'KHÔNG'}", "info")
+        if abs(scale - 1.0) >= 0.00005:
+            log(f"Đồng hồ hình {duration:.3f}s / tiếng "
+                f"{float(clocks.get('audio_ref') or 0):.3f}s — tỉ lệ {scale:.6f}. "
+                "Thoại sẽ được kéo theo PTS hình xuyên suốt (lệch sau 1 phút là lệch tốc độ, "
+                "không phải từng câu).", "warn" if abs(scale - 1) * duration >= 0.4 else "info")
         if duration >= 2 * 3600:
             log("Video dài: nếu bật ghi cứng phụ đề/làm mờ/xoá logo thì phải mã hoá "
                 "lại toàn bộ hình nên sẽ lâu. Nhanh nhất cho phim nhiều giờ là tắt "
@@ -174,22 +194,40 @@ def main():
 
         # 2) ASR -> phụ đề gốc
         a = cfg["asr"]
-        if a.get("reuse_existing") and os.path.exists(src_srt):
-            log(f"Dùng lại phụ đề gốc: {src_srt}", "ok")
+        asr.set_caption_options(a)
+        keep_zh = srt_utils.keep_source_timing(cfg.get("translation") or {})
+        from autodub.asr.common import source_reuse_path
+        reuse_path = source_reuse_path(a, keep_zh, asr_srt, src_srt)
+        if review_context.get('require_asr'):
+            reuse_path = ''
+        reused_src = bool(reuse_path)
+        if reused_src:
+            log(f"Dùng lại phụ đề gốc: {reuse_path}", "ok")
             # Bản đồ thoại phải có TRƯỚC khi gom/chia lại phụ đề, nếu không mọi mốc
             # thời gian lại được nội suy theo tỉ lệ ký tự và voice trượt khỏi hình.
             asr.ensure_speech_map(out_dir, stem, video_path=video_path)
-            segments = srt_utils.load_srt_file(src_srt)
+            segments = srt_utils.load_srt_file(reuse_path)
             # Dùng lại file cũ thì không còn kết quả nhận diện ngôn ngữ của ASR ->
             # đoán từ chính nội dung, để bước sau biết là DỊCH hay SỬA LỖI.
             src_lang = (a.get("source_language")
                         or asr.guess_language(segments) or "auto")
-            before_norm = len(segments)
-            max_chars = 34 if str(src_lang).lower()[:2] in {"zh", "ja", "ko"} else 80
-            segments = asr.normalize_segments(segments, max_chars)
-            if len(segments) != before_norm:
-                log(f"Đã gom/sửa lại phụ đề gốc cũ: {before_norm} -> {len(segments)} dòng.", "ok")
-                srt_utils.save_srt_file(src_srt, segments)
+            if not keep_zh or asr.caption_style_is_screen():
+                before_norm = len(segments)
+                max_chars = asr._max_chars_for(src_lang, 80)
+                raw_segments = list(segments)
+                segments = asr.normalize_segments(segments, max_chars)
+                if asr.caption_style_is_screen():
+                    from autodub.asr.screen_pack import ensure_complete
+                    ensure_complete(segments, raw_segments, tmp_dir)
+                if len(segments) != before_norm:
+                    if asr.caption_style_is_screen():
+                        log(f"Cắt phụ đề kiểu CapCut: {before_norm} -> {len(segments)} dòng "
+                            "(~14 chữ / ~2.7s, ngắt khi im lặng). Bước Dịch khớp bản Việt cũ theo đồng hồ.",
+                            "ok")
+                    else:
+                        log(f"Đã gom/sửa lại phụ đề gốc cũ: {before_norm} -> {len(segments)} dòng.", "ok")
+            else:
+                log("Giữ nhịp SRT Trung: không gộp/chia lại mốc ASR.", "ok")
             # File cũ có thể còn câu BỊA từ lần nhận diện trước - lọc luôn, nếu
             # không chúng sẽ được dịch rồi ĐỌC TO trong video lồng tiếng.
             if a.get("filter_hallucinations", True):
@@ -207,11 +245,12 @@ def main():
                 nfix = asr.apply_corrections(segments, a["corrections"])
                 if nfix:
                     log(f"Đã sửa {nfix} dòng theo bảng asr.corrections.", "ok")
-                    srt_utils.save_srt_file(src_srt, segments)
+            srt_utils.save_srt_file(src_srt, segments)
         else:
             log("Tách audio...", "step")
             audio_wav = video.ensure_audio(video_path, audio_wav,
-                                           loudnorm=a.get("loudnorm", True))
+                                           loudnorm=a.get("loudnorm", True),
+                                           reuse_existing=not review_context.get('require_asr', False))
             log(f"Nhận diện phụ đề (backend={a['backend']})...", "step")
             segments, src_lang = asr.transcribe(
                 audio_wav, backend=a["backend"], language=a.get("source_language"),
@@ -230,7 +269,16 @@ def main():
                 filter_hallucinations=a.get("filter_hallucinations", True),
                 corrections=a.get("corrections"),
                 vocab_hint=a.get("vocab_hint"),
+                caption_style=a.get("caption_style"),
+                screen_max_chars=a.get("screen_max_chars"),
+                screen_min_chars=a.get("screen_min_chars"),
+                screen_max_duration=a.get("screen_max_duration"),
+                screen_hard_max_chars=a.get("screen_hard_max_chars"),
+                screen_hard_max_duration=a.get("screen_hard_max_duration"),
+                screen_gap=a.get("screen_gap"),
+                funasr_merge_length_s=a.get("funasr_merge_length_s"),
             )
+            srt_utils.save_srt_file(asr_srt, segments)
             srt_utils.save_srt_file(src_srt, segments)
             sm = speechmap.get_active()
             if sm is not None:
@@ -252,8 +300,11 @@ def main():
 
         # 4) Dịch sang tiếng Việt
         tr = cfg["translation"]
-        prep_source = bool(tr.get("split_on_punctuation", True)
-                           or tr.get("merge_source_fragments", True))
+        prep_source = (not srt_utils.keep_source_timing(tr)) and bool(
+            tr.get("split_on_punctuation", True)
+            or tr.get("merge_source_fragments", True))
+        if srt_utils.keep_source_timing(tr):
+            log("Giữ nhịp SRT Trung: 1 câu gốc = 1 câu Việt, cùng start/end.", "ok")
         if prep_source:
             before_prep = len(segments)
             segments = srt_utils.prepare_source_segments_for_translation(
@@ -269,55 +320,60 @@ def main():
                 log(f"Đã chuẩn bị câu gốc để dịch theo ý nghĩa: "
                     f"{before_prep} -> {len(segments)} dòng.", "ok")
                 srt_utils.save_srt_file(src_srt, segments)
+        wav_for_clock = audio_wav if os.path.exists(audio_wav) else None
+        clock = apply_picture_clock(
+            segments,
+            video_path=video_path,
+            audio_wav=wav_for_clock,
+            trust_wav=bool(wav_for_clock),
+            sidecar=sidecar_path(out_dir, stem),
+            speechmap_path=speechmap.default_path(out_dir, stem),
+            reset=not reused_src,
+        )
+        if clock.get("applied"):
+            srt_utils.save_srt_file(src_srt, segments)
+        from autodub.translate.reuse import reuse_translated_cues
         reuse_vi = bool(tr.get("reuse_existing") and os.path.exists(vi_srt))
         reuse_vi_direct = False
+        translate_dirty = None
         if reuse_vi:
             vi_probe = srt_utils.load_srt_file(vi_srt)
-            dirty_lines = [
-                s.index for s in vi_probe
-                if translate._contains_cjk(s.text)
-            ]
-            if dirty_lines:
-                sample = ", ".join(str(x) for x in dirty_lines[:8])
-                more = "" if len(dirty_lines) <= 8 else f", ... +{len(dirty_lines) - 8}"
-                log(f"Ban dich cu con tieng Trung o dong {sample}{more} "
-                    "-> bo qua file .vi.srt cu va dich lai.", "warn")
-                reuse_vi = False
-            elif len(vi_probe) != len(segments):
-                if vi_probe and len(vi_probe) > len(segments):
-                    log(f"Ban dich cu co {len(vi_probe)} dong, phu de goc co {len(segments)} dong. "
-                        "Co ve day la ban da chia lai/polish tu lan truoc -> dung truc tiep.", "ok")
-                    # Mốc thời gian trong file cũ được sinh bằng cách chia theo tỉ lệ
-                    # ký tự nên đang lệch. Chữ thì giữ nguyên (có thể đã sửa tay),
-                    # chỉ neo lại mốc theo bản đồ thoại.
-                    doi = srt_utils.reanchor_translated_segments(vi_probe, segments)
-                    if doi:
-                        log(f"Da neo lai moc thoi gian cho {doi} dong cua ban dich cu "
-                            "theo ban do thoai.", "ok")
-                    segments = vi_probe
-                    reuse_vi_direct = True
-                else:
-                    log(f"Ban dich cu co {len(vi_probe)} dong, phu de goc hien tai co "
-                        f"{len(segments)} dong -> bo qua file .vi.srt cu va dich lai.", "warn")
-                    reuse_vi = False
-
-        if reuse_vi:
-            log(f"Dùng lại bản dịch: {vi_srt}", "ok")
-            vi_segments = srt_utils.load_srt_file(vi_srt)
-            # Chỉ lấy TEXT Việt, giữ timing từ phụ đề gốc hiện tại. Nếu số dòng lệch
-            # thì nhánh trên đã tắt reuse để tránh dùng lại timestamp .vi.srt cũ.
-            cleaned_reuse = 0
-            for s, v in zip(segments, vi_segments):
-                clean_text = srt_utils.normalize_vi_subtitle_text(v.text)
-                if clean_text != v.text:
-                    cleaned_reuse += 1
-                s.text = clean_text
-            if cleaned_reuse:
-                log(f"Da don sach {cleaned_reuse} dong metadata bi lot trong ban dich cu.", "ok")
+            restore_metadata(vi_probe, os.path.join(out_dir, f"{stem}.dich_cache.json"))
+            ok, dirty_idx, copied, repaired = reuse_translated_cues(segments, vi_probe)
+            if ok:
+                if repaired:
+                    log(f"Da va {repaired} tu Trung con sot trong ban dich cu, khong dich lai ca phim.",
+                        "ok")
+                if len(vi_probe) != len(segments):
+                    log(f"Khop ban dich cu theo dong ho: giu {copied}/{len(segments)} dong "
+                        f"(file cu {len(vi_probe)} dong). Khong dich lai ca phim.", "ok")
+                if dirty_idx:
+                    sample = ", ".join(str(segments[i].index) for i in dirty_idx[:8])
+                    more = "" if len(dirty_idx) <= 8 else f", ... +{len(dirty_idx) - 8}"
+                    log(f"Ban dich cu con tieng Trung o dong {sample}{more} "
+                        "-> chi dich lai cac dong do, khong dich lai ca phim.", "warn")
+                    translate_dirty = [segments[i] for i in dirty_idx]
                 srt_utils.save_srt_file(vi_srt, segments)
-            # Bản dịch cũ (dịch trước khi có ràng buộc độ dài) thường dài gấp đôi
-            # thời lượng -> lồng tiếng chắc chắn trễ. Báo rõ thay vì để người dùng
-            # tự đoán vì sao video vẫn chạy trước giọng.
+            elif vi_probe and len(vi_probe) > len(segments):
+                log(f"Ban dich cu co {len(vi_probe)} dong, phu de goc co {len(segments)} dong. "
+                    "Co ve day la ban da chia lai/polish tu lan truoc -> dung truc tiep.", "ok")
+                doi = srt_utils.reanchor_translated_segments(vi_probe, segments)
+                if doi:
+                    log(f"Da neo lai moc thoi gian cho {doi} dong cua ban dich cu "
+                        "theo ban do thoai.", "ok")
+                segments = vi_probe
+                reuse_vi_direct = True
+            else:
+                log(f"Ban dich cu co {len(vi_probe)} dong, phu de goc hien tai co "
+                    f"{len(segments)} dong va dong ho khong khop -> bo qua file .vi.srt cu "
+                    "va dich lai.", "warn")
+                reuse_vi = False
+
+        if reuse_vi and not translate_dirty:
+            log(f"Dùng lại bản dịch: {vi_srt}", "ok")
+            if not reuse_vi_direct:
+                # Text already copied onto current source clocks.
+                pass
             cps_cfg = float(tr.get("chars_per_sec", 0) or 0)
             if cps_cfg > 0 and segments:
                 need = sum(len(s.text) for s in segments)
@@ -327,8 +383,13 @@ def main():
                         "giọng sẽ TRỄ so với hình.", "warn")
                     log(f"  Muốn hết trễ: XOÁ file {os.path.basename(vi_srt)} rồi "
                         "chạy lại để dịch lại theo đúng thời lượng.", "warn")
-        if not reuse_vi:
-            log("Dịch sang tiếng Việt (giữ ngữ điệu, nhất quán nhân vật)...", "step")
+        if (not reuse_vi) or translate_dirty:
+            targets = translate_dirty if translate_dirty else segments
+            if translate_dirty:
+                log(f"Dịch {len(targets)} dòng lệch đồng hồ/còn tiếng Trung, "
+                    "giữ các dòng Việt đã khớp.", "step")
+            else:
+                log("Dịch sang tiếng Việt (giữ ngữ điệu, nhất quán nhân vật)...", "step")
             # Cache theo lô: lỗi giữa chừng thì lần chạy sau dịch tiếp, không làm lại.
             tr_cache = os.path.join(out_dir, f"{stem}.dich_cache.json")
             partial_srt = os.path.join(out_dir, f"{stem}.vi.CHUA_XONG.srt")
@@ -337,9 +398,10 @@ def main():
                 name_hint = translate.build_name_hint(
                     tr.get("male_lead_name", ""),
                     tr.get("female_lead_name", ""))
+                film_hint = translate.build_film_hint(stem)
                 if provider == "browser":
                     translate.translate_via_browser(
-                        segments, os.path.join(here, tr.get("browser_profile", "browser_profile")),
+                        targets, os.path.join(here, tr.get("browser_profile", "browser_profile")),
                         channel=tr.get("browser_channel", "msedge"),
                         chunk_size=tr.get("chunk_size", 25),
                         wait_reply=tr.get("wait_reply", 120),
@@ -347,13 +409,15 @@ def main():
                         cache_path=tr_cache, source_lang=src_lang,
                         chars_per_sec=tr.get("chars_per_sec", 0.0),
                         name_hint=name_hint,
+                        film_hint=film_hint,
                         shorten_long_lines_enabled=bool(
-                            tr.get("shorten_long_lines", True)))
+                            tr.get("shorten_long_lines", True)),
+                        translation_cfg=tr)
                 else:
                     api_key, model, api_base_url, api_timeout = \
                         translate.api_params_for_provider(tr, provider)
                     translate.translate_segments(
-                        segments, api_key=api_key,
+                        targets, api_key=api_key,
                         model=model,
                         provider=provider,
                         api_base_url=api_base_url,
@@ -362,8 +426,10 @@ def main():
                         cache_path=tr_cache,
                         chars_per_sec=tr.get("chars_per_sec", 0.0),
                         name_hint=name_hint,
+                        film_hint=film_hint,
                         shorten_long_lines_enabled=bool(
-                            tr.get("shorten_long_lines", True)))
+                            tr.get("shorten_long_lines", True)),
+                        translation_cfg=tr)
             except Exception as e:
                 # KHÔNG ghi đè <stem>.vi.srt bằng bản dở dang: lần chạy sau
                 # reuse_existing sẽ tưởng đã dịch xong rồi lồng tiếng luôn.
@@ -385,7 +451,7 @@ def main():
                         pass
 
         # 5) Tổng hợp giọng + chống đè thoại
-        if tr.get("polish_subtitles", True):
+        if (not srt_utils.keep_source_timing(tr)) and tr.get("polish_subtitles", True):
             before_polish = len(segments)
             before_polish_state = [(s.start, s.end, s.text) for s in segments]
             segments = srt_utils.polish_translated_segments(
@@ -414,10 +480,29 @@ def main():
                 log(f"Da tach sub Viet theo dau cau: {before_split} -> {len(segments)} dong.", "ok")
                 srt_utils.save_srt_file(vi_srt, segments)
 
+        from autodub.vi_cues import finalize_spoken_vi_cues
+        n_clean = finalize_spoken_vi_cues(segments, tr)
+        if n_clean:
+            log(f"Đã làm sạch {n_clean} dòng SRT Việt lần cuối "
+                "(đủ nhịp đọc, giữ mốc).", "ok")
+            srt_utils.save_srt_file(vi_srt, segments)
+
         # Cảnh báo TRƯỚC khi tổng hợp giọng: nếu bản dịch dài hơn khung thời gian
         # thì mọi câu sẽ bị nén/cắt và thoại kết thúc sớm hơn hình. Biết trước ở đây
         # còn kịp sửa, thay vì render xong 30 phút mới phát hiện.
         translate.log_reading_pressure(segments, tr.get("chars_per_sec", 15.0) or 15.0)
+
+        clock = apply_picture_clock(
+            segments,
+            video_path=video_path,
+            audio_wav=audio_wav if os.path.exists(audio_wav) else None,
+            trust_wav=os.path.exists(audio_wav),
+            sidecar=sidecar_path(out_dir, stem),
+            speechmap_path=speechmap.default_path(out_dir, stem),
+            reset=False,
+        )
+        if clock.get("applied"):
+            srt_utils.save_srt_file(vi_srt, segments)
 
         tcfg = cfg["tts"]
         t_engine = (tcfg.get("engine", "edge") or "edge").lower()
@@ -436,15 +521,18 @@ def main():
             base_rate=tcfg.get("base_rate", "+0%"), max_speed=tcfg.get("max_speed", 1.6),
             min_gap=tcfg.get("min_gap", 0.08), concurrency=tcfg.get("concurrency", 8),
             max_retries=tcfg.get("max_retries", 4), retry_base_delay=tcfg.get("retry_delay", 1.2),
-            fail_report_path=tts_fail_report, recover_drift=tcfg.get("recover_drift", True),
+            fail_report_path=tts_fail_report, recover_drift=tcfg.get("recover_drift", False),
             vieneu_voice=tcfg.get("vieneu_voice"), vieneu_voices=tcfg.get("vieneu_voices"),
             vieneu_options=tcfg.get("vieneu_options"),
             capcut_options=tcfg.get("capcut_options"),
             trim=tcfg.get("trim_silence", True),
             sync_offset_seconds=tcfg.get("sync_offset_seconds", 0.0),
-            sync_mode=tcfg.get("sync_mode", "cascade"),
+            sync_mode=tcfg.get("sync_mode", "strict"),
             trim_overflow=tcfg.get("trim_overflow", True),
             max_overhang=tcfg.get("max_overhang_seconds", 0.75),
+            lock_av=tcfg.get("lock_av", True),
+            max_start_drift=tcfg.get("max_start_drift_seconds", 5.0),
+            semantic_cfg=tr if tcfg.get("semantic_groups", tr.get("semantic_translation", True)) else None,
         )
         from autodub.timeline import summarize
         log(f"Chống đè thoại: {summarize(placements)}", "ok")
@@ -467,7 +555,21 @@ def main():
             mode=v.get("audio_mix_mode", "auto"),
             chunk_seconds=v.get("audio_mix_chunk_seconds", 120),
         )
+        dub_wav = video.lock_audio_to_picture_duration(dub_wav, duration)
         log(f"Bước 6 hoàn tất trong {time.time() - t6:.1f}s.", "ok")
+
+        from autodub.video.sync_check import check_dub_sync
+        sync_report = check_dub_sync(
+            video_path, dub_wav, segments,
+            out_dir=out_dir, duration=duration, stem=stem, make_previews=True,
+            placements_max_drift=max((p.drift for p in placements), default=0.0),
+        )
+        kind = "ok" if sync_report.get("verdict") == "ok" else (
+            "warn" if sync_report.get("verdict") == "warn" else "err")
+        log(sync_report.get("message") or "Đã kiểm tra khớp hình.", kind)
+        if sync_report.get("verdict") == "fail":
+            log("Kiểm tra khớp hình chưa đạt — vẫn xuất cả phim để có file dùng được.",
+                "warn")
 
         # 7) Render video cuối
         hardsub = None
@@ -498,8 +600,21 @@ def main():
         )
         log(f"Bước 7 hoàn tất trong {time.time() - t7:.1f}s.", "ok")
 
+        from autodub.youtube_pack.dub_scenes import attach_dub_thumbnails
+        pack = attach_dub_thumbnails(
+            video_path, segments=segments, out_dir=out_dir, duration=duration,
+            title=stem, cfg=cfg, logger=log, fallback_video=final_out)
+        if pack.get("thumbnail_path"):
+            print(f"{C.G}  Thumbnail:{C.E} {pack['thumbnail_path']}")
+            if pack.get("caption_path"):
+                print(f"{C.DIM}  Câu thumbnail: {pack['caption_path']}{C.E}")
+
     finally:
-        if not cfg["output"].get("keep_temp"):
+        # Existing temp folders may contain a previous run or user diagnostics.
+        # Only recursively remove the directory created by this invocation.
+        durable_review = any(os.path.isfile(os.path.join(tmp_dir, name)) for name in
+                             ('non_speech.json', 'review_latest.json', 'review_source.json'))
+        if owns_tmp_dir and not cfg["output"].get("keep_temp") and not durable_review:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     dt = time.time() - t0

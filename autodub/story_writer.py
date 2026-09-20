@@ -7,6 +7,7 @@ vô tình đưa cả bản thiết kế/kiểm tra vào TTS.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
 import re
@@ -15,6 +16,8 @@ import sys
 import threading
 import time
 import uuid
+import unicodedata
+from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from .utils import register_running_process, unregister_running_process
@@ -96,6 +99,65 @@ def _append_cta_args(cmd: list, cta: Optional[Dict]) -> None:
         cmd.extend(["--cta-text", cta_text])
 
 
+def _title_key(title: str) -> str:
+    return " ".join(unicodedata.normalize("NFC", title).casefold().split())
+
+
+def _one_title_typo(left: str, right: str) -> bool:
+    """Chỉ dung sai một ký tự ở tiêu đề dài; không ghép theo chủ đề."""
+    if min(len(left), len(right)) < 40 or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) == 1
+    short, long = sorted((left, right), key=len)
+    mismatch = next((i for i, (a, b) in enumerate(zip(short, long)) if a != b), len(short))
+    return short[mismatch:] == long[mismatch + 1:]
+
+
+def find_saved_story(title: str, cfg: Dict, rewrite_brief: str = "") -> Optional[Dict]:
+    """Khôi phục bản hoàn tất theo tiêu đề thật, chất liệu và checksum."""
+    settings = resolve_settings(cfg)
+    tool_cfg = {}
+    try:
+        tool_cfg = json.loads((Path(settings["tool_dir"]) / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    root = Path(_resolve_path(tool_cfg.get("output_dir") or "output", settings["tool_dir"]))
+    brief_hash = hashlib.sha256(rewrite_brief.strip().encode("utf-8")).hexdigest() if rewrite_brief.strip() else ""
+    candidates = []
+    wanted = _title_key(title)
+    writer_cfg = cfg.get("tao_kich_ban") or {}
+    minimum = int(writer_cfg.get("quality_target_min_words", 12000)) * max(.8, min(1., float(writer_cfg.get("quality_min_word_ratio", .95))))
+    maximum = int(writer_cfg.get("quality_target_max_words", 16000))
+    for path in root.glob("*/thong_tin.json"):
+        try:
+            meta = json.loads(path.read_text(encoding="utf-8"))
+            saved_title = _title_key(str(meta.get("tieu_de") or ""))
+            if saved_title != wanted and not _one_title_typo(saved_title, wanted):
+                continue
+            if brief_hash and meta.get("source_brief_sha256") != brief_hash:
+                continue
+            script = path.parent / "KICH_BAN_DOC.txt"
+            text = script.read_text(encoding="utf-8")
+            if hashlib.sha256(text.encode("utf-8")).hexdigest() != meta.get("script_sha256"):
+                continue
+            measured = meta.get("kiem_tra_tu_dong") or {}
+            words = len(text.split())
+            if not (minimum <= words <= maximum and measured.get("dialogue_target") and not measured.get("banned_terms")):
+                continue
+            candidates.append({"title": meta["tieu_de"], "folder": str(path.parent),
+                               "script_path": str(script), "words": words, "meta": meta,
+                               "design_path": str(path.parent / "00_ban_thiet_ke.txt"),
+                               "result_json": ""})
+        except (OSError, ValueError, TypeError):
+            continue
+    exact = [x for x in candidates if _title_key(x["title"]) == wanted]
+    candidates = exact or candidates
+    if len({(_title_key(x["title"]), x["meta"].get("source_brief_sha256", "")) for x in candidates}) > 1:
+        raise StoryWriterError("Có nhiều bản cùng tiêu đề nhưng khác chất liệu. Hãy chọn đúng ý tưởng trong danh sách để tiếp tục.")
+    return max(candidates, key=lambda x: os.path.getmtime(x["script_path"])) if candidates else None
+
+
 def generate(title: str, cfg: Dict, log: Optional[Callable] = None,
              progress: Optional[Callable] = None, cancel_event=None,
              cta: Optional[Dict] = None, rewrite_brief: str = "") -> Dict:
@@ -107,6 +169,29 @@ def generate(title: str, cfg: Dict, log: Optional[Callable] = None,
     entry = _validate(settings)
     log = log or (lambda _msg, _kind="info": None)
     progress = progress or (lambda _done, _total, _msg="": None)
+
+    # Lưu chất liệu trước khi mở tiến trình: đóng app giữa chừng vẫn resume đúng thư mục.
+    checkpoint_dir = Path(settings["tool_dir"]) / ".autodub_resume"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint = checkpoint_dir / (hashlib.sha256(_title_key(title).encode("utf-8")).hexdigest() + ".json")
+    if not str(rewrite_brief or "").strip():
+        try:
+            saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+            if _title_key(saved["title"]) == _title_key(title):
+                rewrite_brief = str(saved.get("rewrite_brief") or "")
+        except (OSError, ValueError, KeyError):
+            pass
+    previous = find_saved_story(title, cfg, rewrite_brief)
+    if previous:
+        if _title_key(previous["title"]) != _title_key(title):
+            log("Tiêu đề lệch một ký tự; khôi phục bản đã lưu: %s" % previous["title"], "warn")
+        log("Dùng lại kịch bản đã lưu: %s (%d từ); tiếp tục bước còn thiếu."
+            % (previous["script_path"], previous["words"]), "ok")
+        progress(1, 1, "Đã khôi phục kịch bản")
+        return previous
+    temp_checkpoint = checkpoint.with_suffix(".tmp")
+    temp_checkpoint.write_text(json.dumps({"title": title, "rewrite_brief": rewrite_brief}, ensure_ascii=False), encoding="utf-8")
+    os.replace(temp_checkpoint, checkpoint)
 
     result_dir = os.path.join(HERE, "output", "_tmp", "tao_kich_ban")
     os.makedirs(result_dir, exist_ok=True)

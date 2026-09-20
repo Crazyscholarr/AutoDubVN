@@ -1,44 +1,48 @@
-venv/
-.venv/
+# Python environments and generated caches
+/venv/
+/.venv/
+/venv_py310_backup/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
 
-browser_profile/
-downloads/
-output/
-
-.cursor/
-
-config.yaml
+# Local settings and credentials (publish config.example.yaml instead)
+/config.yaml
 .env
 .env.*
+!.env.example
+/.cursor/
+/.idea/
+/.vscode/
+
+# Browser sessions contain cookies and account state
+/browser_profile*/
+/unused-test-profile/
+
+# User media, job history, databases and downloaded music
+/downloads/
+/output/
+/outputs/
+/data/
+/assets/nhac_nen/
+
+# Downloaded toolchains, models and build products
+/tools/
+/models/
+/build/
+/dist/
+
+# Temporary files and operating-system metadata
+/_tmp/
 *.log
-# Local / generated
-venv/
-.venv/
-__pycache__/
-*.pyc
-browser_profile/
-downloads/
-output/
-.cursor/
-config.yaml
-.env
-.env.*
-*.log
+*.tmp
 *.bak*
-cat >> .gitignore <<'EOF'
-
-# Media assets
-assets/nhac_nen/*.mp3
-assets/nhac_nen/*.flac
-assets/nhac_nen/*.wav
-
-# Large/local tools
-tools/
-EOFlogin_gemini.bat
-
-/login_gemini.bat
-
-venv_py310_backup/
-tests/
+*.swp
+Thumbs.db
+.DS_Store

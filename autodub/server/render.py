@@ -17,6 +17,9 @@ from ..srt_utils import Segment
 from ..utils import (log, run, ffprobe_duration, has_nvenc,
                      ffprobe_video_codec, ffprobe_fps, nvenc_encode_args,
                      has_h264_mf, resolve_keep_original_db, which)
+from ..media_clock import picture_duration_for
+from ..video.common import audio_duration_lock_chain
+from ..video.process import lock_audio_to_picture_duration
 from .state import HERE, _log
 from .projects import get_project, _segments_from_project
 
@@ -104,11 +107,13 @@ def _render_mp4box_replace_audio(video: str, dub_wav: str, out_path: str,
                                  mp4box: str) -> None:
     audio_mp4 = out_path + ".audio.m4a"
     try:
-        src_dur = ffprobe_duration(video)
+        src_dur = picture_duration_for(video) or ffprobe_duration(video)
         timeout = _render_timeout_seconds(src_dur, reencode=False)
         cmd = ["ffmpeg", "-y", "-i", dub_wav, "-vn"]
         if src_dur > 0:
-            cmd += ["-af", f"apad,atrim=0:{src_dur:.3f},asetpts=N/SR/TB"]
+            dub_wav = lock_audio_to_picture_duration(dub_wav, src_dur)
+            cmd = ["ffmpeg", "-y", "-i", dub_wav, "-vn"]
+            cmd += ["-af", audio_duration_lock_chain(src_dur)]
         cmd += ["-c:a", "aac", "-b:a", "192k", "-ac", "2", audio_mp4]
         run(cmd, timeout=timeout)
         run([mp4box, "-quiet", "-add", f"{video}#video",
@@ -269,7 +274,10 @@ def render_with_layers_chunked(pr: Dict, dub_wav: Optional[str], out_path: str,
     opt = pr.get("options", {})
     chunk_minutes = float(opt.get("render_chunk_minutes") or 0.0)
     chunk_seconds = chunk_minutes * 60.0
-    duration = float(pr.get("duration") or ffprobe_duration(pr["video"]) or 0.0)
+    duration = picture_duration_for(pr.get("video") or "", pr) or float(
+        pr.get("duration") or ffprobe_duration(pr["video"]) or 0.0)
+    if dub_wav:
+        dub_wav = lock_audio_to_picture_duration(dub_wav, duration)
     chunks = _chunk_bounds(duration, chunk_seconds)
     if len(chunks) <= 1:
         has_offset = float(pr.get("source_offset") or 0.0) > 0.001
@@ -277,6 +285,7 @@ def render_with_layers_chunked(pr: Dict, dub_wav: Optional[str], out_path: str,
             pr, dub_wav, out_path, ass_path,
             clip_duration=duration if has_offset else None,
             validate_full_source=not has_offset,
+            lock_dub=False,
         )
 
     part_dir = os.path.join(tmp_dir, "render_parts")
@@ -344,7 +353,7 @@ def render_with_layers_chunked(pr: Dict, dub_wav: Optional[str], out_path: str,
         _log(f"Render phần {idx}/{len(chunks)}: {start/60:.1f} -> {(start+dur)/60:.1f} phút", "step")
         render_with_layers(local_pr, dub_wav, part, local_ass,
                            clip_start=start, clip_duration=dur,
-                           validate_full_source=False)
+                           validate_full_source=False, lock_dub=False)
         manifest["parts"].append(part_info)
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=2)
@@ -360,16 +369,20 @@ def render_with_layers_chunked(pr: Dict, dub_wav: Optional[str], out_path: str,
 def render_with_layers(pr: Dict, dub_wav: Optional[str], out_path: str,
                        ass_path: Optional[str], clip_start: float = 0.0,
                        clip_duration: Optional[float] = None,
-                       validate_full_source: bool = True) -> str:
+                       validate_full_source: bool = True,
+                       lock_dub: bool = True) -> str:
     """Xuất video cuối với đủ 3 lớp + tiếng lồng."""
     opt = pr.get("options", {})
     vw, vh = pr["w"], pr["h"]
     logo = pr.get("logo")
     clip_start = max(0.0, float(clip_start or 0.0))
     source_offset = max(0.0, float(pr.get("source_offset") or 0.0))
-    src_dur = float(clip_duration or pr.get("duration") or ffprobe_duration(pr["video"]) or 0.0)
+    src_dur = float(clip_duration or picture_duration_for(pr["video"], pr)
+                    or pr.get("duration") or ffprobe_duration(pr["video"]) or 0.0)
     if src_dur <= 0:
         raise RuntimeError("Không đọc được thời lượng video gốc, dừng để tránh xuất file lỗi.")
+    if lock_dub and dub_wav and os.path.exists(dub_wav):
+        dub_wav = lock_audio_to_picture_duration(dub_wav, src_dur)
 
     def _media_input(path: str, start: float = 0.0,
                      duration: Optional[float] = None) -> List[str]:
@@ -402,24 +415,23 @@ def render_with_layers(pr: Dict, dub_wav: Optional[str], out_path: str,
         logo_input_index=logo_idx, logo=logo)
     video_has_filters = bool(filters)
 
-    # Âm thanh
+    # Âm thanh: khóa đúng số mẫu + PTS hình, tránh thoại chạy trước trên phim dài
     alabel = None
     keep_db = resolve_keep_original_db(opt)
+    lock = audio_duration_lock_chain(src_dur)
     if dub_idx is not None and keep_db is not None:
         filters.append(
             f"[0:a]volume={float(keep_db)}dB[bg];"
-            f"[{dub_idx}:a]apad,atrim=0:{src_dur:.3f},asetpts=N/SR/TB[dubpad];"
+            f"[{dub_idx}:a]{lock}[dubpad];"
             f"[bg][dubpad]amix=inputs=2:duration=first:"
-            f"dropout_transition=0,apad,atrim=0:{src_dur:.3f},asetpts=N/SR/TB[aout]")
+            f"dropout_transition=0,{lock}[aout]")
         alabel = "[aout]"
         _log(f"Giu am goc: {keep_db:+.1f} dB", "info")
     elif dub_idx is not None:
-        filters.append(
-            f"[{dub_idx}:a]apad,atrim=0:{src_dur:.3f},asetpts=N/SR/TB[aout]")
+        filters.append(f"[{dub_idx}:a]{lock}[aout]")
         alabel = "[aout]"
     else:
-        filters.append(
-            f"[0:a]apad,atrim=0:{src_dur:.3f},asetpts=N/SR/TB[aout]")
+        filters.append(f"[0:a]{lock}[aout]")
         alabel = "[aout]"
 
     cmd = ["ffmpeg", "-y", *inputs]
@@ -510,7 +522,8 @@ def render_with_layers(pr: Dict, dub_wav: Optional[str], out_path: str,
     # Kiểm tra file xuất ra có thật sự dùng được không, thay vì báo "xong" mù quáng
     out_codec, _ = ffprobe_video_codec(out_path)
     out_dur = ffprobe_duration(out_path)
-    expected_dur = src_dur if not validate_full_source else ffprobe_duration(pr["video"])
+    expected_dur = src_dur if not validate_full_source else (
+        picture_duration_for(pr["video"], pr) or ffprobe_duration(pr["video"]))
     max_drift = max(2.0, expected_dur * 0.05)
     if not out_codec:
         raise RuntimeError("File xuất ra KHÔNG có luồng hình - render hỏng.")

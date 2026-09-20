@@ -1,11 +1,13 @@
 # ===== Bắt buộc =====
 pyyaml
+Pillow            # kiểm tra và lưu ảnh Gemini khi nút tải bị lỗi
 edge-tts>=6.1.9
 requests>=2.25.0
 openpyxl>=3.1.5   # xuất kế hoạch sản xuất Excel nhiều sheet
 pandas>=2.2.0     # xử lý/lọc dữ liệu hàng loạt và tương thích workflow phân tích
 soundfile          # ghép timeline audio kiểu streaming cho video nhiều giờ
 yt-dlp            # tải video từ link (Bilibili/YouTube...)
+PySocks           # proxy SOCKS5 khi download.proxy dùng socks5:// (Clash/V2Ray)
 playwright        # dịch bằng cách điều khiển Edge vào Gemini (không cần API key)
 # (ghép audio dùng thẳng ffmpeg - không cần pydub)
 
@@ -14,6 +16,7 @@ playwright        # dịch bằng cách điều khiển Edge vào Gemini (không
 # backend "paraformer" (mặc định, tốt nhất tiếng Trung) cần funasr + modelscope:
 funasr!=1.3.9      # né bản 1.3.9 lỗi FSMN-VAD (trả 1 đoạn khổng lồ)
 modelscope
+jieba>=0.42.1     # Chinese word boundaries for screen captions (fallback available)
 # backend "faster-whisper" (đa ngôn ngữ, dự phòng):
 faster-whisper
 

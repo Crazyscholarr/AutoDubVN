@@ -295,6 +295,17 @@ class Api:
         except Exception:
             return False
 
+    def login_chatgpt(self):
+        """Mở Chrome/Edge với hồ sơ ChatGPT riêng để đăng nhập một lần."""
+        try:
+            from autodub.chatgpt_web import launch_chatgpt_login
+            result = launch_chatgpt_login()
+            if not result.get("ok"):
+                return {"error": result.get("error") or "Không mở được trình duyệt"}
+            return result
+        except Exception as exc:
+            return {"error": str(exc)}
+
     def open_url(self, url: str):
         """Mở trang ngoài (ví dụ AI Studio) bằng trình duyệt mặc định."""
         try:

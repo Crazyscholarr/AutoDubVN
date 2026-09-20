@@ -42,9 +42,49 @@ def submit_job(target, *, name: str, resource: str = "default",
     # A legacy direct thread may have left this fallback event set. Managed
     # jobs use their own token, so clearing it cannot un-cancel another job.
     _CANCEL_EVENT.clear()
-    return JOB_MANAGER.submit(
-        target, name=name, resource=resource, foreground=foreground,
-        metadata=metadata, args=args, kwargs=kwargs)
+    def release_reservation(error=""):
+        """The worker's finally block cannot run if it never left the queue."""
+        kind = str((metadata or {}).get("kind") or "")
+        status = "Không khởi động được tác vụ" if error else "Đã dừng tác vụ"
+        with _LOCK:
+            if kind == "queue_download":
+                item = _find((metadata or {}).get("queue_id"))
+                if item:
+                    item.update(status="lỗi" if error else "đã huỷ", note=error or status)
+                return
+            if kind.startswith("content_"):
+                section = STATE["content_pipeline"]
+            elif kind.startswith("video_tools_"):
+                section = STATE["video_tools"]
+                active = section.get("active", "")
+                if active:
+                    section[active + "_status"] = error or status
+                STATE.update(running=False, busy="")
+            elif kind in {"detect_hardsub", "model_prefetch", "music_download"}:
+                STATE["busy"] = ""
+                return
+            elif kind in {"dub_pipeline", "asr_rerecognize"}:
+                STATE["running"] = False
+                item = _find((metadata or {}).get("queue_id"))
+                if item:
+                    item.update(status="lỗi" if error else "đã huỷ", note=error or status)
+                return
+            elif kind.startswith("story_") or kind in {"manual_tts", "manual_mux", "music_mix"}:
+                section = STATE["manual"]
+                STATE.update(running=False, busy="")
+            else:
+                return
+            section.update(working=False, active="", status=status, error=error,
+                           rev=int(section.get("rev", 0)) + 1)
+
+    try:
+        return JOB_MANAGER.submit(
+            target, name=name, resource=resource, foreground=foreground,
+            metadata=metadata, args=args, kwargs=kwargs,
+            on_cancel=release_reservation)
+    except Exception as exc:
+        release_reservation(str(exc))
+        raise
 
 
 def shutdown_background_jobs(wait: bool = True, timeout: float = 12.0) -> bool:
@@ -77,7 +117,7 @@ STATE: Dict = {
         "source_status": "", "source_done": 0, "source_total": 0,
         "content_idea_id": "", "content_outline": "", "rewrite_brief": "",
         "youtube_description": "", "youtube_tags": [], "metadata_path": "",
-        "calendar_path": "",
+        "calendar_path": "", "thumbnail_path": "", "description_path": "",
         "reference_keyword": "", "reference_results": [],
         "reference_status": "", "cut_status": "", "cut_done": 0, "cut_total": 0,
     },

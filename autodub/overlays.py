@@ -247,10 +247,10 @@ def _display_window(seg: Segment, start: float, end: float,
         voice_dur = 0.0
 
     if voice_dur > 0.01:
-        # Khi đã có TTS, phụ đề nên tắt ngay sau voice. Không áp max_duration
-        # vào nhánh này vì voice dài thật mà phụ đề biến mất giữa câu còn tệ hơn.
-        wanted = max(min_dur, voice_dur + pad)
-        return start, start + wanted
+        # Dubbed captions must equal the spoken slice. min_duration / tail_pad
+        # / read_cps make on-screen text linger or vanish while the voice
+        # continues, which looks like subs running fast then slow.
+        return start, start + voice_dur
 
     readable = len(re.sub(r"\s+", "", text or "")) / cps + pad
     wanted = max(min_dur, min(max_dur, readable))
@@ -423,7 +423,10 @@ def build_ass(
                 voice_dur = float(voice_dur) if voice_dur is not None else 0.0
             except (TypeError, ValueError):
                 voice_dur = 0.0
-            end = seg.placed_start + max(0.3, seg.duration, voice_dur)
+            if voice_dur > 0.01:
+                end = start + voice_dur
+            else:
+                end = start + max(0.3, seg.duration)
         else:
             start, end = seg.start, seg.end
         start, end = _display_window(seg, start, end, seg.text or "", st)
