@@ -46,3 +46,16 @@ htmlcov/
 *.swp
 Thumbs.db
 .DS_Store
+
+# Local QA, benchmarks and diagnostic reports are archived outside this repo.
+/tests/
+/test-results/
+/playwright-report/
+/logs/
+/tools_speed_probe.py
+/scripts/*
+!/scripts/content_pipeline.py
+!/scripts/CHAY_KE_HOACH_HANG_TUAN.bat
+/docs/*
+!/docs/CONTENT_PIPELINE.md
+!/docs/SEMANTIC_PIPELINE.md

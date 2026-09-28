@@ -132,30 +132,9 @@ _tmp/                          audio trích, clip, mix, render
 
 Có sidecar speech-map/media-clock/sync-check, thumbnail tùy chọn. CLI chỉ xóa `_tmp` do lượt chạy tạo khi `keep_temp` tắt; thư mục có sẵn được giữ. Chạy lại cùng stem có thể thay artifact: sao lưu/dùng QA output riêng. Job history ở `data/background_jobs.json`, nội dung ở SQLite cấu hình.
 
-### Testing và phát triển
+### Mã nguồn và dữ liệu cục bộ
 
-```powershell
-$env:PYTHONUTF8 = '1'
-.\venv\Scripts\python.exe -m unittest discover -s tests -v
-.\venv\Scripts\python.exe -m unittest discover -s tests -p test_beautify_safety.py -v
-.\venv\Scripts\python.exe -m unittest discover -s tests -p test_dub_e2e.py -v
-.\venv\Scripts\python.exe -m compileall -q autodub gui scripts main.py
-.\venv\Scripts\python.exe -m pip check
-node --test tests\test_story_ui_state.js
-```
-
-Suite mặc định không gọi dịch/TTS live. E2E dùng Windows SAPI tạo lời thoại, mock ASR/phản hồi mạng, chạy media thật. Browser tests dùng Playwright với Edge local (`channel="msedge"`), cần Edge đã cài, không đăng nhập AI. Media tests cần FFmpeg/FFprobe; Node không cần cho app.
-
-```powershell
-.\venv\Scripts\python.exe -m pip install coverage ruff
-$env:COVERAGE_FILE = Join-Path $env:TEMP ('autodub-' + [guid]::NewGuid().ToString('N') + '.coverage')
-.\venv\Scripts\python.exe -m coverage run --source=autodub,main -m unittest discover -s tests
-.\venv\Scripts\python.exe -m coverage report
-.\venv\Scripts\python.exe -m ruff check --select E9,F63,F7,F82 autodub gui scripts tests main.py
-
-```
-
-Coverage/Ruff là dependency kiểm thử bổ sung. Mã test được giữ trong `tests/`; cache và kết quả kiểm thử không đưa lên Git. Chưa cấu hình formatter/type checker; Ruff trên chỉ kiểm tra lỗi nghiêm trọng.
+Repository chỉ chứa mã ứng dụng và hướng dẫn sử dụng. Bộ kiểm thử, benchmark, báo cáo chẩn đoán và log được lưu riêng ngoài dự án; không đưa lên GitHub. Cấu hình cá nhân, video và kết quả xử lý nằm trong các thư mục được Git bỏ qua.
 
 ### Troubleshooting, giới hạn và riêng tư
 
@@ -298,30 +277,9 @@ _tmp/                          extracted audio, clips, mix, render
 
 Optional speech-map/media-clock/sync-check sidecars and thumbnails are produced. CLI deletes `_tmp` only if this invocation created it and `keep_temp` is false; existing directories are preserved. Re-running a stem may replace artifacts: back up/use separate QA output. Job history is in `data/background_jobs.json`; content uses configured SQLite storage.
 
-### Testing and development
+### Source code and local data
 
-```powershell
-$env:PYTHONUTF8 = '1'
-.\venv\Scripts\python.exe -m unittest discover -s tests -v
-.\venv\Scripts\python.exe -m unittest discover -s tests -p test_beautify_safety.py -v
-.\venv\Scripts\python.exe -m unittest discover -s tests -p test_dub_e2e.py -v
-.\venv\Scripts\python.exe -m compileall -q autodub gui scripts main.py
-.\venv\Scripts\python.exe -m pip check
-node --test tests\test_story_ui_state.js
-```
-
-The default suite makes no live translation/TTS requests. E2E uses Windows SAPI spoken fixtures, mocked ASR/network responses and real media operations. Browser tests use Playwright with local Edge (`channel="msedge"`), require installed Edge and do not log in to AI services. Media tests need FFmpeg/FFprobe; Node is not required by the app.
-
-```powershell
-.\venv\Scripts\python.exe -m pip install coverage ruff
-$env:COVERAGE_FILE = Join-Path $env:TEMP ('autodub-' + [guid]::NewGuid().ToString('N') + '.coverage')
-.\venv\Scripts\python.exe -m coverage run --source=autodub,main -m unittest discover -s tests
-.\venv\Scripts\python.exe -m coverage report
-.\venv\Scripts\python.exe -m ruff check --select E9,F63,F7,F82 autodub gui scripts tests main.py
-
-```
-
-Coverage/Ruff are additional test dependencies. Test sources remain in `tests/`; caches and results are excluded from Git. No formatter/type checker is configured; these Ruff rules check serious errors only.
+This repository contains application code and user documentation. Tests, benchmarks, diagnostic reports and logs are kept separately outside the project and excluded from GitHub. Personal configuration, media and generated outputs remain in Git-ignored locations.
 
 ### Troubleshooting, limitations and privacy
 
