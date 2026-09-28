@@ -9,6 +9,24 @@ from autodub.server import config_api
 
 
 class ConfigRuntimeTests(unittest.TestCase):
+    def test_translation_batch_and_quality_controls_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'config.yaml'
+            path.write_text('translation:\n  provider: xkiro\n  semantic_batch_cues: 10\n',encoding='utf-8')
+            with mock.patch.object(config_api,'CONFIG_PATH',str(path)):
+                config_api._invalidate_cfg_cache()
+                before=config_api._translation_cfg_for_gui()
+                self.assertEqual(before['semantic_batch_cues'],10)
+                values=dict(semantic_batch_cues=30,semantic_context_cues=0,
+                            keep_source_timing=False,shorten_long_lines=True,reuse_existing=False)
+                config_api._save_translation_cfg(values)
+                after=config_api._translation_cfg_for_gui()
+                self.assertEqual({k:after[k] for k in values},values)
+                config_api._save_translation_cfg({'semantic_batch_cues':100})
+                self.assertEqual(config_api._translation_cfg_for_gui()['semantic_batch_cues'],30)
+                with self.assertRaises(ValueError):
+                    config_api._save_translation_cfg({'reuse_existing':'false'})
+
     def test_xkiro_roundtrip_and_dispatch(self):
         from autodub.translate import api as api_mod
         from autodub.providers import api_params_for_provider

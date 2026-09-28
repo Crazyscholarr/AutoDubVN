@@ -537,11 +537,11 @@ def _validate_download_file(path: str, cookie_hint: str,
             "cookies, thử hạ download.quality xuống 480."
         )
 
-    log(f"Đã tải: {os.path.basename(path)}", "ok")
+    log(f"Đã tải: {os.path.basename(path)} · kích thước thực {w}×{h}", "ok")
     if progress_callback:
         progress_callback({"status": "complete", "percent": 100.0,
-                           "text": "Tải xong: " + os.path.basename(path),
-                           "path": path})
+                           "text": f"Tải xong ({w}×{h}): " + os.path.basename(path),
+                           "path": path, "width": w, "height": h})
     return path
 
 
@@ -645,6 +645,7 @@ def download_video(
             try:
                 direct_path, direct_qn, direct_kind = bilibili_direct.download_bilibili(
                     url, out_dir, quality=str(quality), cookies_file=cookies_file,
+                    cookies_from_browser=cookies_from_browser,
                     progress_callback=_on_direct_progress)
                 log("Bilibili trực tiếp: %s · luồng %s · đã tự chọn CDN nhanh nhất."
                     % (bilibili_direct.quality_label(direct_qn), direct_kind.upper()),

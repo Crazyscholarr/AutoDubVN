@@ -9,6 +9,25 @@ from autodub.server import http_api, projects
 
 
 class UiRuntimeTests(unittest.TestCase):
+    def test_translation_controls_save_effective_batch_and_reuse_flag(self):
+        import yaml
+        config_path = self.http.root / 'config.yaml'
+        config_path.write_text(yaml.safe_dump(json.loads(config_path.read_text(encoding='utf-8'))),encoding='utf-8')
+        self.page.wait_for_function("typeof refresh === 'function'")
+        self.page.evaluate("PR={options:{},segments:[],regions:[],sub_style:{}};setMode('dub');setTab('tr')")
+        batch=self.page.locator('input[onchange*="semantic_batch_cues"]')
+        self.assertEqual(batch.input_value(),'30')
+        batch.fill('24')
+        batch.dispatch_event('change')
+        self.page.locator('input[onchange*="reuse_existing"]').uncheck()
+        self.assertTrue(self.page.evaluate('clearTimeout(configTimer);saveTrCfg(false)'))
+        self.page.reload()
+        self.page.wait_for_function("typeof refresh === 'function' && CFG.translation && CFG.translation.semantic_batch_cues === 24")
+        self.page.evaluate("PR={options:{},segments:[],regions:[],sub_style:{}};setMode('dub');setTab('tr')")
+        self.assertEqual(self.page.locator('input[onchange*="semantic_batch_cues"]').input_value(),'24')
+        self.assertFalse(self.page.locator('input[onchange*="reuse_existing"]').is_checked())
+        self.assertEqual(self.errors,[])
+
     def test_xkiro_can_be_selected_saved_and_reloaded(self):
         import yaml
         config_path = self.http.root / "config.yaml"
@@ -50,7 +69,7 @@ class UiRuntimeTests(unittest.TestCase):
         self.addCleanup(self.context.close)
         self.page = self.context.new_page()
         self.errors = []
-        self.page.on("pageerror", lambda exc: self.errors.append(str(exc)))
+        self.page.on("pageerror", lambda exc: self.errors.append(exc.stack or str(exc)))
         self.page.goto("http://%s:%s/" % self.http.server.server_address)
         self.page.wait_for_function("typeof STORY !== 'undefined' && typeof setMode === 'function'")
 

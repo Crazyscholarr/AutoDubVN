@@ -142,8 +142,8 @@ def groups(segments, cfg=None, *, speech=False):
 
 def batches(segments, cfg=None):
     cfg = cfg or {}
-    limit = max(6, min(30, int(cfg.get("semantic_batch_cues", 10))))
-    seconds = max(20.0, min(60.0, float(cfg.get("semantic_batch_seconds", 45))))
+    limit = max(6, min(30, int(cfg.get("semantic_batch_cues", 30))))
+    seconds = max(20.0, min(60.0, float(cfg.get("semantic_batch_seconds", 60))))
     try:
         max_chars = int(cfg.get("semantic_batch_chars", 2400) or 2400)
     except (TypeError, ValueError):

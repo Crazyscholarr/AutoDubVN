@@ -40,9 +40,9 @@ translation:
   split_on_punctuation: true       # Tách phụ đề GỐC theo dấu kết câu mạnh: . ? ! 。？！ …
   keep_source_timing: true         # Giữ số cue/start/end; câu dịch có thể phủ nhiều cue.
   semantic_translation: true      # Cùng pipeline cho API (xkiro) và Gemini web (provider: browser)
-  semantic_batch_cues: 10         # 6–30 cue đích; lô nhỏ JSON ít lỗi hơn, dán vừa Gemini web
-  semantic_batch_seconds: 45      # 20–60 giây; batch ngắn hơn ở cuối/ranh giới
-  semantic_context_cues: 2        # 0–5 cue trước/sau, chỉ đọc
+  semantic_batch_cues: 30         # 6–30 cue; giữ câu đạt, chỉ yêu cầu sửa cue lỗi
+  semantic_batch_seconds: 60      # 20–60 giây; batch ngắn hơn ở cuối/ranh giới
+  semantic_context_cues: 10       # 0–10 cue trước/sau; ngữ cảnh trước có cả bản Việt
   max_group_gap_ms: 1400          # Không chuyển chữ/đọc liền qua khoảng nghỉ lớn hơn mức này
   semantic_group_max_cues: 6
   semantic_group_max_seconds: 20

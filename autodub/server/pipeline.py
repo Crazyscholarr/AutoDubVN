@@ -13,6 +13,7 @@ import json
 import shutil
 import time
 import traceback
+from dataclasses import replace
 from typing import Dict, List, Optional
 
 from .. import srt_utils, overlays, speechmap
@@ -37,6 +38,23 @@ from .projects import (get_project, _save_project_state, _active_media_span, _ru
                        _render_project_for_span,
                        _load_existing_segments_into_project)
 from .render import render_with_layers, render_with_layers_chunked
+
+
+def _translate_with_source_retry(segs, translate, on_retry):
+    """Retry from immutable source clocks/text; validated work resumes through cache."""
+    from ..translate.cache import TranslationIncomplete
+    source = [replace(s) for s in segs]
+    for attempt in range(2):
+        try:
+            translate(segs)
+            return
+        except TranslationIncomplete as exc:
+            # The translator mutates completed cues before it raises. Feeding
+            # those Vietnamese cues back as Chinese input corrupts context/cache.
+            segs[:] = [replace(s) for s in source]
+            if attempt:
+                raise
+            on_retry(exc)
 
 
 def _asr_transcribe_kwargs(a: Dict) -> Dict:
@@ -445,8 +463,10 @@ def ack_caption_review(job_id: int, ranges, continue_pipeline: bool = False) -> 
     source = Path(root) / "source.srt"
     packed_segs = srt_utils.load_srt_file(str(packed)) if packed.is_file() else []
     source_segs = srt_utils.load_srt_file(str(source)) if source.is_file() else []
-    chosen = packed if packed_segs else source
-    chosen_segs = packed_segs or source_segs
+    # Empty is a valid filtered result, not permission to resurrect raw ASR
+    # hallucinations. Raw fallback is only for legacy artifacts without a pack.
+    chosen = packed if packed.is_file() else source
+    chosen_segs = packed_segs if packed.is_file() else source_segs
     if not chosen_segs:
         return {"ok": False, "error": "Không có phụ đề Trung để tiếp tục.", "code": 400}
     asr_srt = os.path.join(out_dir, f"{stem}.asr.srt")
@@ -456,8 +476,21 @@ def ack_caption_review(job_id: int, ranges, continue_pipeline: bool = False) -> 
     smap = Path(root) / "speechmap.json"
     if smap.is_file():
         shutil.copy2(smap, speechmap.default_path(out_dir, stem))
-    _load_existing_segments_into_project(pr, src_srt)
-    _save_project_state(pr)
+    # Review artifacts use clip-local clocks. Preserve edits only for an
+    # unambiguous, unchanged cue; positional matching can reuse a wrong translation.
+    def cue_key(row):
+        return (round(float(row['start']), 3), round(float(row['end']), 3),
+                row.get('src', ''))
+
+    previous = {}
+    for row in _project_rows_for_span(pr, span):
+        previous.setdefault(cue_key(row), []).append(row)
+    local_rows = _load_local_rows_from_srt(src_srt)
+    for index, row in enumerate(local_rows):
+        matches = previous.get(cue_key(row), [])
+        if len(matches) == 1:
+            local_rows[index] = dict(matches[0])
+    _sync_project_rows_for_span(pr, span, local_rows)
     from ..asr.nonspeech import mark_review_prepared
     mark_review_prepared(root, state['items'], root)
     bump_rev(job_id)
@@ -1273,20 +1306,10 @@ def _run_pipeline(job_id: int, steps: List[str]):
                 bump_rev(job_id)
                 _log_stage("translate", t_tr)
             else:
-                tries = 0
-                while True:
-                    try:
-                        _dich_nhom_segments(segs, cache_path)
-                        break
-                    except tr_mod.TranslationIncomplete as exc:
-                        tries += 1
-                        if tries >= 2:
-                            raise
-                        _log(
-                            f"Còn lô dịch thiếu ({exc}); dịch lại đúng các cue còn lỗ, "
-                            f"không bỏ cả phim.",
-                            "warn",
-                        )
+                _translate_with_source_retry(
+                    segs, lambda rows: _dich_nhom_segments(rows, cache_path),
+                    lambda exc: _log(f"Còn lô dịch thiếu ({exc}); nối tiếp cache từ phụ đề gốc, "
+                                     "chỉ yêu cầu các câu chưa đạt.", "warn"))
                 for row, s in zip(local_rows, segs):
                     row["vi"] = s.text
                     copy_metadata(s, row)

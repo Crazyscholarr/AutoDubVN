@@ -79,12 +79,11 @@ class CDNTransfer(unittest.TestCase):
         self.assertEqual(B._stream_urls({'baseUrl': urls[0], 'base_url': urls[1],
             'backupUrl': urls[2:7], 'backup_url': urls[7:]}), tuple(urls))
 
-    def test_real_probe_samples_2mib_or_complete_small_file(self):
-        self.assertEqual(B._PROBE_SAMPLE, 2 * 1024 * 1024)
+    def test_real_probe_samples_bounded_prefix_or_complete_small_file(self):
         probe = B._probe(self.base + '/fast', {})
         self.assertTrue(probe.accepts_ranges)
         self.assertEqual(probe.length, len(DATA))
-        self.assertEqual(probe.sample_hash, hashlib.sha256(DATA).hexdigest())
+        self.assertEqual(probe.sample_hash, hashlib.sha256(DATA[:B._PROBE_SAMPLE]).hexdigest())
         self.assertGreater(probe.speed, 0)
 
     def test_wrong_range_and_short_body_rejected(self):
@@ -130,8 +129,9 @@ class CDNTransfer(unittest.TestCase):
             # Corrupt a previously hashed prefix; the resume manifest must detect it.
             with open(path, 'r+b') as handle:
                 handle.write(b'X')
-            self.assertEqual(B._resume_records(path, len(DATA),
-                hashlib.sha256(str([self.base + '/fast']).encode()).hexdigest()), [])
+            records = B._resume_records(path, len(DATA),
+                hashlib.sha256(str([self.base + '/fast']).encode()).hexdigest())
+            self.assertEqual([r['start'] for r in records], list(range(B._CHUNK, len(DATA), B._CHUNK)))
 
     def test_no_range_has_measured_speed_and_single_download(self):
         probe = B._probe(self.base + '/single', {})

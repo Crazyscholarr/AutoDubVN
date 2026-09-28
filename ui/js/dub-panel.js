@@ -607,8 +607,10 @@ function renderPanel(){
         <option value="tokenrouter_gemini" ${provider==="tokenrouter_gemini"?"selected":""}>tokenrouter - Gemini 3.6 Flash</option>
         <option value="tokenrouter" ${provider==="tokenrouter"?"selected":""}>tokenrouter - Kimi K3 free</option>
       </select>`)}
-      ${fld("Số dòng mỗi lượt",`<input type="number" min="1" step="1"
-        value="${Number(tr.chunk_size||80)}"
+      ${fld("Số dòng mỗi lượt",tr.semantic_translation!==false ? `<input type="number" min="6" max="30" step="1"
+        value="${Number(tr.semantic_batch_cues||30)}"
+        onchange="setTrCfg('semantic_batch_cues',Math.min(30,Math.max(6,+this.value||30)))">`
+        : `<input type="number" min="1" step="1" value="${Number(tr.chunk_size||80)}"
         onchange="setTrCfg('chunk_size',Math.max(1,+this.value||80))">`)}
       ${fld("Nhịp ký tự / giây",`<input type="number" min="0" step="1"
         value="${Number(tr.chars_per_sec??14)}"
@@ -626,6 +628,11 @@ function renderPanel(){
     </div>
     <label class="chk2"><input type="checkbox" ${tr.keep_source_timing!==false?"checked":""}
       onchange="setTrCfg('keep_source_timing',this.checked)"> Giữ nhịp phụ đề Trung (1 câu Trung = 1 câu Việt)</label>
+    <label class="chk2"><input type="checkbox" ${tr.shorten_long_lines!==false?"checked":""}
+      onchange="setTrCfg('shorten_long_lines',this.checked)"> Rút gọn câu vượt nhịp đọc</label>
+    <label class="chk2"><input type="checkbox" ${tr.reuse_existing!==false?"checked":""}
+      onchange="setTrCfg('reuse_existing',this.checked)"> Dùng lại bản dịch đã có</label>
+    <div class="hint">Bỏ chọn dùng lại nếu muốn tạo bản dịch mới. Các câu đã đạt trong lượt dịch mới vẫn được lưu để tiếp tục khi gián đoạn.</div>
     <div class="hint">Bật (mặc định): mỗi câu Việt <b>cùng start/end</b> với SRT Trung — không gộp nhiều câu Trung thành một câu Việt dài.
       Tắt thì app gộp mảnh ASR rồi chia lại sub Việt theo ý (câu Việt dài hơn miệng Trung).
       Sau khi dịch, app <b>chia lại chữ Việt trong đúng mốc</b> theo ngữ pháp (không cắt <b>tôi / đã...</b>), 环 bắn đích = <b>điểm</b>.</div>

@@ -83,8 +83,9 @@ function renderVideoTools(){
         <div class="vt-options"><div class="vt-field"><label>Chất lượng video nền</label>
           <select id="vtDownloadQuality" ${working?"disabled":""}>
             <option value="360" ${VIDEO_TOOLS.quality==="360"?"selected":""}>Tối đa 360p · nhẹ</option>
-            <option value="480" ${VIDEO_TOOLS.quality==="480"?"selected":""}>Tối đa 480p · khuyên dùng</option>
+            <option value="480" ${VIDEO_TOOLS.quality==="480"?"selected":""}>Tối đa 480p · tiết kiệm dung lượng</option>
             <option value="720" ${VIDEO_TOOLS.quality==="720"?"selected":""}>Tối đa 720p</option>
+            <option value="1080" ${VIDEO_TOOLS.quality==="1080"?"selected":""}>Tối đa 1080p</option>
             <option value="best" ${VIDEO_TOOLS.quality==="best"?"selected":""}>Nét tốt nhất có thể</option>
           </select></div><div class="vt-field"><label>Xử lý đồng thời</label>
           <input value="Tối đa 3 video" disabled></div></div>

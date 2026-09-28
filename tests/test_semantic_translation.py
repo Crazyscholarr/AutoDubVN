@@ -181,11 +181,11 @@ class SemanticTests(unittest.TestCase):
         segs[0].text += "七月"
         notes = []
         obj = translation()
-        translated_validator(segs, {101: 0, 102: 0},
-                             {"七月": {"vi": "Thất Nguyệt", "locked": True}},
-                             "han_viet", notes)(obj)
-        self.assertIn("Thất Nguyệt", obj["translated_sentences"][0]["text_vi"])
-        self.assertTrue(any("locked_name_inserted" in n for n in notes))
+        with self.assertRaisesRegex(ValueError, 'glossary'):
+            translated_validator(segs, {101: 0, 102: 0},
+                                 {"七月": {"vi": "Thất Nguyệt", "locked": True}},
+                                 "han_viet", notes)(obj)
+        self.assertEqual(obj['translated_sentences'][0]['text_vi'], 'Vì tôi đã về nhà.')
 
     def test_uncertain_name_is_skipped_not_batch_failed(self):
         segs, obj = source(), translation()
@@ -253,16 +253,16 @@ class SemanticTests(unittest.TestCase):
         translated_validator(segs, {101: 0, 102: 0}, glossary, "han_viet")(obj)
         self.assertEqual(obj["translated_sentences"][0]["text_vi"], "Vì Thất Nguyệt đã về nhà.")
 
-    def test_one_cue_missing_locked_name_is_inserted(self):
+    def test_one_cue_missing_locked_name_needs_semantic_repair(self):
         segs = [Segment(1, 0, 2, "去五道中学报到")]
         obj = dict(translated_sentences=[dict(sentence_id="s1", source_ids=[1],
                                               text_vi="Đi báo danh đi.", speaker=None)],
                    new_entities=[], updated_summary="ok", warnings=[])
         notes = []
         glossary = {"五道中学": {"vi": "Trường Trung học Ngũ Đạo", "locked": True, "type": "location"}}
-        translated_validator(segs, {1: 0}, glossary, "han_viet", notes)(obj)
-        self.assertIn("Trường Trung học Ngũ Đạo", obj["translated_sentences"][0]["text_vi"])
-        self.assertTrue(any("locked_name_inserted" in n for n in notes))
+        with self.assertRaisesRegex(ValueError, 'glossary'):
+            translated_validator(segs, {1: 0}, glossary, "han_viet", notes)(obj)
+        self.assertEqual(obj['translated_sentences'][0]['text_vi'], 'Đi báo danh đi.')
 
     def test_one_cue_retries_hole_in_place(self):
         segs = [Segment(1, 0, 2, "因为我回来了")]
@@ -286,7 +286,7 @@ class SemanticTests(unittest.TestCase):
         self.assertEqual(segs[0].text, "Vì tôi đã về nhà.")
         self.assertGreaterEqual(n["i"], 3)
 
-    def test_split_then_insert_locked_name_completes(self):
+    def test_model_repairs_missing_name_in_its_correct_grammatical_role(self):
         segs = [Segment(i + 1, float(i), float(i) + 0.9, "去五道中学报到") for i in range(3)]
         glossary = {"五道中学": {"vi": "Trường Trung học Ngũ Đạo", "locked": True, "type": "location"}}
 
@@ -302,7 +302,9 @@ class SemanticTests(unittest.TestCase):
             refs = [x["id"] for x in payload["target_cues"]]
             return json.dumps(dict(
                 translated_sentences=[dict(sentence_id="s%d" % x, source_ids=[x],
-                                           text_vi="Đi báo danh đi.", speaker=None) for x in refs],
+                                           text_vi=("Đến Trường Trung học Ngũ Đạo báo danh."
+                                                    if 'Sửa lỗi validation' in prompt else "Đi báo danh đi."),
+                                           speaker=None) for x in refs],
                 new_entities=[], updated_summary="ok", warnings=[]))
 
         translate_semantic(segs, ask, {
@@ -310,7 +312,7 @@ class SemanticTests(unittest.TestCase):
             "semantic_batch_seconds": 60, "glossary": glossary,
         })
         self.assertEqual([s.index for s in segs], [1, 2, 3])
-        self.assertTrue(all("Trường Trung học Ngũ Đạo" in s.text for s in segs))
+        self.assertTrue(all(s.text == "Đến Trường Trung học Ngũ Đạo báo danh." for s in segs))
 
     def test_common_or_short_locked_token_is_not_required(self):
         segs, obj = source(), translation()
@@ -425,15 +427,15 @@ class SemanticTests(unittest.TestCase):
         translated_validator(segs, {101: 0, 102: 0}, {}, "han_viet", notes)(obj)
         self.assertIn("照管", obj["translated_sentences"][0]["text_vi"])
 
-    def test_missing_locked_name_inserted_on_multi_cue_batch(self):
+    def test_missing_locked_name_rejected_on_multi_cue_batch(self):
         segs = source()
         segs[0].text += "五道中学"
         obj = translation()
         notes = []
         glossary = {"五道中学": {"vi": "Trường Trung học Ngũ Đạo", "locked": True, "type": "location"}}
-        translated_validator(segs, {101: 0, 102: 0}, glossary, "han_viet", notes)(obj)
-        self.assertIn("Trường Trung học Ngũ Đạo", obj["translated_sentences"][0]["text_vi"])
-        self.assertTrue(any("locked_name_inserted" in n for n in notes))
+        with self.assertRaisesRegex(ValueError, 'glossary'):
+            translated_validator(segs, {101: 0, 102: 0}, glossary, "han_viet", notes)(obj)
+        self.assertEqual(obj['translated_sentences'][0]['text_vi'], 'Vì tôi đã về nhà.')
 
     def test_unused_new_entity_is_not_written_to_glossary(self):
         segs = [Segment(i + 1, i * 2, i * 2 + 1.9, "纷纷来了") for i in range(25)]
@@ -557,7 +559,8 @@ class SemanticTests(unittest.TestCase):
                                   updated_summary="Thất Nguyệt đã đến.", warnings=[]))
             return json.dumps(dict(cues=[dict(id=x["id"],start=x["start"],end=x["end"],text="Thất Nguyệt đã đến.")
                                       for x in payload["source_cues"]],warnings=[]))
-        translate_semantic(segs, ask, {"vi_beautify": False})
+        translate_semantic(segs, ask, {"vi_beautify": False, 'semantic_batch_cues':12,
+                                       'semantic_context_cues':2})
         self.assertGreater(len(seen), 1)
         owned = [r["id"] for p in seen for r in p["target_cues"]]
         self.assertEqual(owned, list(range(1,26)))

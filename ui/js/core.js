@@ -514,7 +514,7 @@ const VIDEO_TOOLS={
   links:"",
   search_keyword:"", search_provider:"all", search_count:10,
   search_results:[], search_selected:[],
-  quality:localStorage.getItem("advn_vt_quality")||"480",
+  quality:localStorage.getItem("advn_vt_quality")||"best",
   download_output:localStorage.getItem("advn_vt_download_output")||"",
   download_files:[],
   cut_inputs:[],

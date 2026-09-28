@@ -381,6 +381,67 @@ class HttpRuntimeTests(unittest.TestCase):
         self.assertEqual(submit.call_args.kwargs["args"], (4, 4193.08, 4268.44))
         state.STATE["running"] = False
 
+    def test_review_resume_preserves_trim_clock_and_existing_translation(self):
+        self._check_trim_review_resume('活下去', True)
+
+    def test_review_resume_does_not_reuse_translation_for_changed_source(self):
+        self._check_trim_review_resume('新的话', False)
+
+    def _check_trim_review_resume(self, reviewed_text, unchanged):
+        video=self.root/'film.mp4';video.write_bytes(b'fake')
+        before=dict(start=1.,end=2.,src='前',vi='Trước')
+        inside=dict(start=11.,end=12.,src='活下去',vi='Hãy sống tiếp',speaker='A')
+        after=dict(start=25.,end=26.,src='后',vi='Sau')
+        pr=dict(video=str(video),duration=30.,picture_duration=30.,regions=[],logo=None,
+                sub_style={},segments=[before,inside,after],
+                options=dict(trim_enabled=True,trim_start=10.,trim_end=20.))
+        stem,_=projects._run_stem_for_project(pr,projects._active_media_span(pr))
+        review=self.root/'output'/stem/'_tmp/caption-review-trim'
+        review.mkdir(parents=True)
+        srt=f'1\n00:00:01,000 --> 00:00:02,000\n{reviewed_text}\n'
+        (review/'source.srt').write_text(srt,encoding='utf-8')
+        (review/'packed.needs-review.srt').write_text(srt,encoding='utf-8')
+        (review/'review.json').write_text('[]',encoding='utf-8')
+        state.PROJECTS[4]=pr
+        state.STATE['queue']=[dict(id=4,path=str(video),review_dir=str(review),
+                                  result_status='REVIEW_REQUIRED')]
+        with mock.patch.object(pipeline,'HERE',self.tmp.name), \
+             mock.patch.object(http_api,'submit_job',return_value='resume'):
+            status,_,body=self.request('/api/caption_review/ack',
+                                      dict(id=4,ranges=[],continue_pipeline=True))
+        self.assertEqual(status,200,body)
+        if unchanged:
+            self.assertEqual(pr['segments'],[before,inside,after])
+        else:
+            self.assertEqual(pr['segments'][0], before)
+            self.assertEqual(pr['segments'][2], after)
+            updated = pr['segments'][1]
+            self.assertEqual((updated['start'], updated['end']), (11., 12.))
+            self.assertEqual(updated['src'], reviewed_text)
+            self.assertEqual(updated['vi'], '')
+
+    def test_empty_packed_review_cannot_resurrect_discarded_source_text(self):
+        from autodub.asr.nonspeech import save_non_speech
+        review=self.root/'output/film/_tmp/caption-review-empty-pack'
+        review.mkdir(parents=True)
+        gap=dict(start=0,end=1,reason='missing_speech_marks',withheld=True)
+        (review/'review.json').write_text(json.dumps([gap]),encoding='utf-8')
+        (review/'source.srt').write_text('1\n00:00:00,000 --> 00:00:01,000\n幻听\n',encoding='utf-8')
+        (review/'packed.needs-review.srt').write_text('',encoding='utf-8')
+        save_non_speech(review,[gap])
+        video=self.root/'film.mp4';video.write_bytes(b'fake')
+        state.STATE['queue']=[dict(id=4,path=str(video),review_dir=str(review),
+                                  result_status='REVIEW_REQUIRED')]
+        state.PROJECTS[4]=dict(video=str(video),duration=10.,picture_duration=10.,
+                              regions=[],sub_style={},segments=[],options={})
+        with mock.patch.object(pipeline,'HERE',self.tmp.name), \
+             mock.patch.object(http_api,'submit_job') as submit:
+            status,_,body=self.request('/api/caption_review/ack',
+                                      dict(id=4,ranges=[],continue_pipeline=True))
+        self.assertEqual(status,400)
+        submit.assert_not_called()
+        self.assertFalse((review.parent.parent/'film.src.srt').exists())
+
     def test_saved_missing_marks_ack_can_resume_without_acking_again(self):
         from autodub.asr.nonspeech import save_non_speech
         review = self.root / 'output/film/_tmp/caption-review-marks'

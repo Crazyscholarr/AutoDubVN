@@ -44,7 +44,7 @@ class BilibiliDirectUnitTests(unittest.TestCase):
                 ["https://a.bilivideo.com/s", "https://a.bilivideo.com/f"], {})
         self.assertEqual(winner.url, fast.url)
 
-    def test_probe_2mib_het_han_thi_thu_mau_nho(self):
+    def test_probe_het_han_thi_thu_mau_nho(self):
         events = []
 
         def fake_probe(url, headers, sample=None):
@@ -66,8 +66,9 @@ class BilibiliDirectUnitTests(unittest.TestCase):
             "https://upos-hz-mirrorakam.akamaized.net/a", 10, True, "video/mp4", 100.0)
         ranked = sorted([inland, akamai], key=bilibili_direct._cdn_sort_key)
         self.assertEqual(ranked[0].url, inland.url)
-        self.assertGreater(
-            bilibili_direct._probe_read_deadline(bilibili_direct._PROBE_SAMPLE), 40)
+        self.assertLessEqual(
+            bilibili_direct._probe_read_deadline(bilibili_direct._PROBE_SAMPLE),
+            bilibili_direct._PROBE_BUDGET)
         self.assertEqual(bilibili_direct._PROBE_CAP, 2)
         self.assertEqual(bilibili_direct._range_windows(829 * 1024)[0], 4)
         self.assertEqual(bilibili_direct._range_windows(5 * 1024 * 1024)[0], 12)
@@ -202,7 +203,7 @@ class BilibiliDirectIntegrationTests(unittest.TestCase):
                 return path, 64, "mp4"
 
             with mock.patch.object(bilibili_direct, "download_bilibili",
-                                   side_effect=fake_direct), \
+                                   side_effect=fake_direct) as direct, \
                     mock.patch.object(downloader, "_ytdlp_cmd") as ytdlp, \
                     mock.patch.object(downloader, "ffprobe_video_size",
                                       return_value=(1280, 720)), \
@@ -211,10 +212,12 @@ class BilibiliDirectIntegrationTests(unittest.TestCase):
                                       return_value=False):
                 result = downloader.download_video(
                     "https://www.bilibili.com/video/BV1nRsjeqEE8", tmp,
+                    cookies_from_browser="edge:Default",
                     progress_callback=updates.append)
 
             self.assertEqual(result, os.path.abspath(path))
             self.assertFalse(ytdlp.called)
+            self.assertEqual(direct.call_args.kwargs['cookies_from_browser'], 'edge:Default')
             self.assertEqual(updates[-1]["status"], "complete")
 
     def test_api_truc_tiep_loi_thi_tu_lui_ve_ytdlp(self):

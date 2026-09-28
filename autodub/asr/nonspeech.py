@@ -64,21 +64,10 @@ def compact_ranges(rows: Sequence[dict], limit: int = 0) -> List[dict]:
             break
     # Last explicit decision for an exact region wins. Different sources never merge.
     exact = {(r.get("source_id",""),r["start"],r["end"]):r for r in out}
-    out = sorted(exact.values(),key=lambda r:(r.get("source_id",""),r["resolution"],r["start"],r["end"]))
-    collapsed = []
-    for item in out:
-        if (collapsed and item.get("source_id")==collapsed[-1].get("source_id")
-                and item["resolution"]==collapsed[-1]["resolution"]
-                and item["start"] <= collapsed[-1]["end"] + 0.05):
-            collapsed[-1]["end"] = max(collapsed[-1]["end"], item["end"])
-            if item["reason"] == "suspicious_chunk":
-                collapsed[-1]["reason"] = "suspicious_chunk"
-            note = item.get("note")
-            if note and note not in str(collapsed[-1].get("note") or ""):
-                collapsed[-1]["note"] = ((collapsed[-1].get("note") or "") + "; " + note).strip("; ")[:200]
-        else:
-            collapsed.append(dict(item))
-    return collapsed
+    # Keep decision boundaries so editing/revoking one region does not leave a
+    # previously merged broad confirmation behind. CoverageIndex unions spans
+    # for queries without destroying the persisted human decisions.
+    return sorted(exact.values(),key=lambda r:(r.get("source_id",""),r["resolution"],r["start"],r["end"]))
 
 
 def resolve_dir(anchor) -> Path:
@@ -215,10 +204,16 @@ def save_latest_review(anchor, rows, review_dir=''):
 def load_latest_review(anchor):
     root=resolve_dir(anchor)
     context=source_context(root)
-    data=_read_json(root/'review_latest.json',{})
+    snapshot=root/'review_latest.json'
+    data=_read_json(snapshot,{})
     if isinstance(data,dict) and isinstance(data.get('rows'),list):
         if data.get('source_id','')==context.get('source_id',''):
             return data
+    if snapshot.exists() and (not isinstance(data,dict) or not isinstance(data.get('rows'),list)):
+        # A present-but-corrupt latest state is not a legacy project. Falling
+        # back to an older empty report could silently permit missing speech.
+        return dict(rows=[dict(start=0,end=.001,reason='review_state_corrupt',withheld=True)],
+                    review_dir='',source_id=context.get('source_id',''))
     if context.get('require_asr') or (context and not context.get('allow_legacy')):
         return {}
     # One-time legacy discovery on restart; subsequent loads use the small pointer.

@@ -64,15 +64,21 @@ class CoverageIndex:
         hit -= max(0., self.ends[right-1] - end)
         return hit / (end-start) >= .9
 
+    def intersects(self, start, end):
+        i = bisect_right(self.ends, start)
+        return i < len(self.starts) and self.starts[i] < end
+
 
 def review_state(rows, decisions=(), source_id=''):
     from .nonspeech import ACKABLE_REASONS, compact_ranges
     by_resolution = defaultdict(list)
     for row in compact_ranges(decisions):
-        by_resolution[normalize_resolution(row)].append((row['start']-.05,row['end']+.05))
+        resolution=normalize_resolution(row)
+        pad=0 if resolution in {'UNREVIEWED','CONFIRMED_SPEECH'} else .05
+        by_resolution[resolution].append((row['start']-pad,row['end']+pad))
     indexes = {key: CoverageIndex(value) for key, value in by_resolution.items()}
     # Explicit speech must not be silently masked by an older no-speech claim.
-    precedence = ['CONFIRMED_SPEECH','RESOLVED','IGNORED','CONFIRMED_EFFECT','CONFIRMED_NOISE']
+    precedence = ['CONFIRMED_SPEECH','UNREVIEWED','RESOLVED','IGNORED','CONFIRMED_EFFECT','CONFIRMED_NOISE']
     unique = {}
     for raw in rows or []:
         if not isinstance(raw, dict):
@@ -97,16 +103,19 @@ def review_state(rows, decisions=(), source_id=''):
     for item in sorted(unique.values(),key=lambda r:(r['start'],r['end'],r['reason'])):
         item['raw_withheld'] = item['requires_review']
         resolution = 'UNREVIEWED'
+        explicit=False
         if item.get('reason') in ACKABLE_REASONS:
             for value in precedence:
                 index = indexes.get(value)
-                if index and index.covers(item['start'],item['end']):
+                query=(index.intersects if value in {'UNREVIEWED','CONFIRMED_SPEECH'} else index.covers) if index else None
+                if query and query(item['start'],item['end']):
                     resolution = value
+                    explicit=True
                     break
         blocking = item['requires_review'] and resolution not in NON_BLOCKING
         item.update(resolution=resolution,blocking=blocking,withheld=blocking,
                     needs_review=blocking,
-                    resolution_source='persisted_user_decision' if resolution!='UNREVIEWED' else 'raw_diagnostic')
+                    resolution_source='persisted_user_decision' if explicit else 'raw_diagnostic')
         if resolution in {'CONFIRMED_NOISE','CONFIRMED_EFFECT'}:
             item['human_ack']='non_speech'
         else:

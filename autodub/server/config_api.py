@@ -93,6 +93,8 @@ _TRANSLATION_GUI_KEYS = (
     "female_lead_name",
     "chunk_size",
     "chars_per_sec",
+    "semantic_translation", "semantic_batch_cues", "semantic_context_cues",
+    "keep_source_timing", "shorten_long_lines", "reuse_existing",
 )
 
 
@@ -147,6 +149,12 @@ def _translation_cfg_for_gui() -> Dict:
         "female_lead_name": tr.get("female_lead_name", ""),
         "chunk_size": tr.get("chunk_size", 80),
         "chars_per_sec": tr.get("chars_per_sec", 14),
+        "semantic_translation": tr.get("semantic_translation", True),
+        "semantic_batch_cues": tr.get("semantic_batch_cues", 30),
+        "semantic_context_cues": tr.get("semantic_context_cues", 10),
+        "keep_source_timing": tr.get("keep_source_timing", True),
+        "shorten_long_lines": tr.get("shorten_long_lines", True),
+        "reuse_existing": tr.get("reuse_existing", True),
     }
 
 
@@ -239,6 +247,14 @@ def _save_translation_cfg(updates: Dict) -> Dict:
         clean["zai_timeout"] = max(30, int(float(clean["zai_timeout"] or 120)))
     if "chunk_size" in clean:
         clean["chunk_size"] = max(1, int(float(clean["chunk_size"] or 80)))
+    for key, low, high, default in (("semantic_batch_cues",6,30,30),
+                                   ("semantic_context_cues",0,10,10)):
+        if key in clean:
+            value = clean[key] if clean[key] is not None else default
+            clean[key] = max(low, min(high, int(float(value))))
+    for key in ("semantic_translation", "keep_source_timing", "shorten_long_lines", "reuse_existing"):
+        if key in clean and type(clean[key]) is not bool:
+            raise ValueError(key + " must be boolean")
     if "chars_per_sec" in clean:
         clean["chars_per_sec"] = max(0, float(clean["chars_per_sec"] or 0))
     if "tokenrouter_timeout" in clean:

@@ -209,6 +209,12 @@ def ensure_complete(cues, source, output_parent, review=None, repair_report=None
                              start=s.start if math.isfinite(s.start) else 0,
                              end=s.end if math.isfinite(s.end) else 0,
                              raw_start=str(s.start),raw_end=str(s.end),withheld=True))
+    for s in cues:
+        if not valid_clock(s):
+            rows.append(dict(reason='invalid_clock', text=s.text,
+                             start=s.start if math.isfinite(s.start) else 0,
+                             end=s.end if math.isfinite(s.end) else 0,
+                             raw_start=str(s.start),raw_end=str(s.end),withheld=True))
     state = effective_review(output_parent, rows, emit_log=True)
     raw_rows = rows
     rows = state['items']
@@ -222,7 +228,7 @@ def ensure_complete(cues, source, output_parent, review=None, repair_report=None
     atomic_json(root/'review.json', rows)
     atomic_json(root/'unresolved.json', [r for r in rows if r.get('withheld')])
     atomic_srt(root/'source.srt', [s for s in source if valid_clock(s)])
-    atomic_srt(root/'packed.needs-review.srt', cues)
+    atomic_srt(root/'packed.needs-review.srt', [s for s in cues if valid_clock(s)])
     sm = speechmap.get_active()
     if sm is not None:
         sm.save(str(root / "speechmap.json"))
@@ -267,6 +273,7 @@ class Unit:
     start: float
     end: float
     source: Segment
+    letters: tuple = ()
 
 
 def _notice(review, reason, text, start, end, withheld=False, **extra):
@@ -465,7 +472,8 @@ def _tokens(units, gap, review, protected_words):
                 tokens[-1].text += chunk_text
             return
         token = Unit(
-            chunk_text, spoken_c[0].start, spoken_c[-1].end, spoken_c[0].source
+            chunk_text, spoken_c[0].start, spoken_c[-1].end, spoken_c[0].source,
+            tuple((u.start, u.end) for u in spoken_c),
         )
         if (
             tokens
@@ -475,6 +483,7 @@ def _tokens(units, gap, review, protected_words):
         ):
             tokens[-1].text += chunk_text
             tokens[-1].end = token.end
+            tokens[-1].letters += token.letters
         else:
             tokens.append(token)
 
@@ -528,6 +537,41 @@ def _tokens(units, gap, review, protected_words):
 
 def _size(text):
     return sum(c.isalnum() for c in text)
+
+
+def _bounded_tokens(tokens, hard_chars, hard_duration, review):
+    """Word boundaries are preferred; oversized words split at observed letters.
+
+    Never stretch a character or invent a timestamp to satisfy a display limit.
+    An indivisible observation longer than the limit stays explicit in review.
+    """
+    for token in tokens:
+        positions = [i for i, c in enumerate(token.text) if c.isalnum()]
+        if len(positions) <= hard_chars and token.end-token.start <= hard_duration+1e-6:
+            yield token
+            continue
+        clocks = token.letters
+        if len(clocks) != len(positions):
+            _notice(review, 'token_exceeds_screen_limit', token.text,
+                    token.start, token.end, True)
+            continue
+        start = 0
+        while start < len(positions):
+            end = start + 1
+            while (end < len(positions) and end-start < hard_chars
+                   and clocks[end][1]-clocks[start][0] <= hard_duration+1e-6):
+                end += 1
+            lo = 0 if start == 0 else positions[start]
+            hi = positions[end] if end < len(positions) else len(token.text)
+            piece = Unit(token.text[lo:hi], clocks[start][0], clocks[end-1][1],
+                         token.source, clocks[start:end])
+            if piece.end-piece.start > hard_duration+1e-6:
+                _notice(review, 'token_exceeds_screen_limit', piece.text,
+                        piece.start, piece.end, True)
+            else:
+                yield piece
+            start = end
+        _notice(review, 'split_oversized_word', token.text, token.start, token.end, False)
 
 
 def _clause_boundary(tokens, i):
@@ -642,6 +686,7 @@ def pack(
         tokens = _tokens(
             _units(group, sm, diagnostics), gap, diagnostics, protected_words
         )
+        tokens = list(_bounded_tokens(tokens, hard_chars, hard_duration, diagnostics))
         burst = []
 
         def flush_burst():

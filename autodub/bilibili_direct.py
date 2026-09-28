@@ -4,12 +4,11 @@ Luồng xử lý được chuyển thể từ dự án ``zephyr-breeze-sage-crys
 
 * hỏi song song nhiều API playurl (MP4, DASH và WBI), nếu 412 thì lấy
   ``__playinfo__`` / ``__INITIAL_STATE__`` từ trang xem;
-* đo 2 MiB trên từng baseUrl/backupUrl và xếp CDN theo throughput;
-  nếu đường quốc tế quá chậm thì đo lại mẫu 256 KiB thay vì bỏ cuộc;
+* đo mẫu 256 KiB trong ngân sách thời gian chung, bắt đầu tải khi có CDN tốt;
 * tải file lớn theo các khối Range 2 MiB, tối đa 12 khối song song
   (4 khối khi probe < 512 KiB/s để tránh nghẽn peering VN-TQ);
 * từng khối tự đổi CDN khi một máy chủ ngắt hoặc chảy nhỏ giọt;
-* giữ file ``.part`` để lần sau nối tiếp thay vì tải lại từ đầu.
+* lưu hash từng khối hoàn tất, kể cả sau một khối lỗi, để nối tiếp chính xác.
 
 Module này không phụ thuộc yt-dlp. ``autodub.downloader`` vẫn giữ yt-dlp làm
 đường lui cho URL không phải Bilibili và các trường hợp API trực tiếp bị chặn.
@@ -24,7 +23,7 @@ import re
 import time
 import uuid
 import threading
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.error import HTTPError
@@ -41,12 +40,14 @@ CHROME_UA = (
 )
 _BVID_RE = re.compile(r"\b(BV[0-9A-Za-z]{10})\b", re.I)
 _MIRRORS = (
+    # Test native COS/Ali early, as in the reference downloader. Otherwise the
+    # startup budget can be spent entirely on overseas copies of one path.
+    "upos-sz-mirrorcos.bilivideo.com",
+    "upos-sz-mirrorali.bilivideo.com",
     "upos-sz-mirrorcosov.bilivideo.com",
     "upos-sz-mirroraliov.bilivideo.com",
     "upos-sz-mirrorhwov.bilivideo.com",
-    "upos-sz-mirrorali.bilivideo.com",
     "upos-sz-mirrorhw.bilivideo.com",
-    "upos-sz-mirrorcos.bilivideo.com",
     "upos-sz-estgcos.bilivideo.com",
 )
 _ALLOWED_CDN_SUFFIXES = (
@@ -68,12 +69,14 @@ _WINDOW = 12
 _CHUNK = 2 * 1024 * 1024
 _MULTI_MIN = int(1.2 * 1024 * 1024)
 # Đường VNPT/nhà mạng VN sang CDN Trung Quốc thường chỉ ~100-400 KiB/s.
-# 6 probe 2 MiB cùng lúc sẽ đói băng thông rồi hết hạn, sau đó rơi xuống yt-dlp.
+# Giới hạn số probe đồng thời để còn băng thông cho tải thật.
 _PROBE_CAP = 2
 _READ_SIZE = 256 * 1024
-_PROBE_TIMEOUT = 20.0
-_PROBE_SAMPLE = 2 * 1024 * 1024
-_PROBE_LITE_SAMPLE = 256 * 1024
+_PROBE_TIMEOUT = 4.0
+_PROBE_SAMPLE = 256 * 1024
+_PROBE_LITE_SAMPLE = 32 * 1024
+_PROBE_BUDGET = 8.0
+_PROBE_GRACE = .75
 _MIN_SPEED = 128 * 1024
 _SPEED_WINDOW = 2.0
 _RANGE_TIMEOUT = 20.0
@@ -168,6 +171,85 @@ class StreamChoice:
     declared_size: int = 0
     video_checksums: Tuple[Tuple[str, str], ...] = ()
     audio_checksums: Tuple[Tuple[str, str], ...] = ()
+    width: int = 0
+    height: int = 0
+
+
+def _stream_from_ytdlp(info: Dict) -> StreamChoice:
+    """Use yt-dlp's selected representations, never an advertised quality label."""
+    selected = info.get('requested_formats') or [info]
+    videos = [f for f in selected if f.get('vcodec') not in (None, 'none')]
+    audios = [f for f in selected if f.get('acodec') not in (None, 'none')]
+    if len(videos) != 1 or len(audios) != 1:
+        raise RuntimeError('Danh sách luồng yt-dlp thiếu hình/tiếng hoặc không phải một video')
+    video, audio = videos[0], audios[0]
+    for fmt in (video, audio):
+        if fmt.get('fragments') or fmt.get('protocol') not in (None, 'http', 'https'):
+            raise RuntimeError('Luồng này cần bộ tải yt-dlp gốc')
+    width, height = int(video.get('width') or 0), int(video.get('height') or 0)
+    if not width or not height:
+        raise RuntimeError('Chưa xác định được độ phân giải của luồng nguồn')
+    levels = ((4320, 127), (2160, 120), (1080, 80), (720, 64), (480, 32), (1, 16))
+    qn = next(q for h, q in levels if min(width, height) >= h)
+    video_urls = _collect_urls(video.get('url'))
+    audio_urls = _collect_urls(audio.get('url'))
+    if not video_urls or not audio_urls:
+        raise RuntimeError('yt-dlp trả địa chỉ CDN không hợp lệ')
+    if video is audio:
+        return StreamChoice('mp4', qn, video_urls,
+                            declared_size=int(video.get('filesize') or 0), width=width, height=height)
+    return StreamChoice('dash', qn, video_urls, audio_urls, width=width, height=height)
+
+
+def _ytdlp_metadata(url, quality, cookies_file=None, cookies_from_browser=None, callback=None):
+    """Resolve formats like the reference app; transfer remains range-verified here."""
+    import yt_dlp
+    from .downloader import _QUALITY, _browser_cookie_failed
+
+    class QuietLogger:
+        def debug(self, message):
+            pass
+        warning = debug
+        error = debug
+
+    options = dict(format=_QUALITY.get(str(quality).lower(), _QUALITY['best']),
+                   format_sort=['res', 'vcodec:h264', 'acodec:aac'],
+                   noplaylist=True, playlistend=1, quiet=True, no_warnings=True,
+                   logger=QuietLogger(), socket_timeout=10, retries=1, extractor_retries=1,
+                   skip_download=True, cachedir=False, js_runtimes={'node': {}})
+    if cookies_file:
+        options['cookiefile'] = cookies_file
+    if cookies_from_browser:
+        try:
+            parsed = yt_dlp.parse_options(['--ignore-config', '--cookies-from-browser', cookies_from_browser])
+        except SystemExit as exc:
+            raise ValueError('Cấu hình trình duyệt lấy cookie không hợp lệ') from exc
+        options['cookiesfrombrowser'] = parsed.ydl_opts['cookiesfrombrowser']
+    if _DOWNLOAD_PROXY:
+        options['proxy'] = _DOWNLOAD_PROXY
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        if not options.get('cookiesfrombrowser') or not (
+                _browser_cookie_failed(exc) or 'failed to load cookies' in str(exc).lower()):
+            raise
+        options.pop('cookiesfrombrowser')
+        if callback:
+            callback({'status': 'downloading', 'event': 'cookie_unavailable',
+                      'text': 'Chưa đọc được cookie trình duyệt; kiểm tra các luồng công khai trước.'})
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+    if not isinstance(info, dict) or info.get('_type') in ('playlist', 'multi_video'):
+        raise RuntimeError('Cần một video Bilibili cụ thể')
+    stream = _stream_from_ytdlp(info)
+    headers = _headers(extract_bvid(url), cookies_file, accept='*/*')
+    headers.update(info.get('http_headers') or {})
+    for fmt in info.get('requested_formats') or [info]:
+        if fmt.get('vcodec') not in (None, 'none'):
+            headers.update(fmt.get('http_headers') or {})
+            break
+    return str(info.get('title') or extract_bvid(url)), stream, headers
 
 
 @dataclass(frozen=True)
@@ -465,19 +547,27 @@ def _should_stop_playurl(play: Dict, want: int) -> bool:
 def _pick_best_play(plays: Sequence[Dict], want: int) -> Dict:
     if not plays:
         raise RuntimeError("Không lấy được địa chỉ phát từ Bilibili")
-    def score(play: Dict) -> int:
-        quality = _play_quality(play)
-        durl = play.get("durl") or []
-        has_mp4 = bool(durl and isinstance(durl[0], dict) and durl[0].get("url"))
-        urls = _play_media_urls(play)
+    candidates = []
+    for play in plays:
+        try:
+            stream = _pick_stream(play, want)
+        except (RuntimeError, ValueError, TypeError):
+            continue
+        # The API's top-level quality may advertise 720P while its accessible
+        # DASH entries contain only 480P. Rank the stream we would actually use.
+        quality = stream.quality
+        urls = stream.video_urls
         hosts = {_cdn_host(url) for url in urls if _cdn_host(url)}
-        hit = 2000 if quality >= want else 0
-        # HTML5 MP4 overseas thường chỉ một host Akamai; đừng khóa DASH/backup.
-        mp4_bonus = (250 if has_mp4 and quality >= min(want, 64)
-                     and not _play_is_overseas_only(play) else 0)
+        # CDN/container preferences only break ties at the SAME resolution.
+        # Explicit quality caps prefer a stream within the requested ceiling.
+        quality_key = (quality <= want, quality if quality <= want else -quality)
+        mp4_bonus = (250 if stream.kind == 'mp4' and
+                     not all(_is_overseas_cdn(url) for url in urls) else 0)
         cdn_bonus = min(120, 30 * max(0, len(hosts) - 1))
-        return hit + mp4_bonus + cdn_bonus + quality
-    return max(plays, key=score)
+        candidates.append(((*quality_key, mp4_bonus + cdn_bonus), play))
+    if not candidates:
+        raise RuntimeError("Không có luồng Bilibili đầy đủ hình/tiếng hợp lệ")
+    return max(candidates, key=lambda item: item[0])[1]
 
 
 def _https_url(value: object) -> str:
@@ -897,15 +987,15 @@ def _content_range(response, start, end=None, total=None):
     value = response.headers.get("Content-Range", "")
     match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", value)
     if not match:
-        raise RuntimeError("CDN trả Content-Range không hợp lệ")
+        raise RangeIntegrityError("CDN trả Content-Range không hợp lệ")
     lo, hi, size = map(int, match.groups())
     if lo != start or hi < lo or hi >= size or (end is not None and hi != end) or (total is not None and size != total):
-        raise RuntimeError("CDN trả sai offset/kích thước Content-Range")
+        raise RangeIntegrityError("CDN trả sai offset/kích thước Content-Range")
     if response.headers.get("Content-Encoding", "identity").lower() != "identity":
-        raise RuntimeError("CDN nén dữ liệu Range")
+        raise RangeIntegrityError("CDN nén dữ liệu Range")
     length = response.headers.get("Content-Length")
     if length is not None and int(length) != hi - lo + 1:
-        raise RuntimeError("CDN trả Content-Length không khớp Range")
+        raise RangeIntegrityError("CDN trả Content-Length không khớp Range")
     return hi, size
 
 
@@ -931,13 +1021,12 @@ def _read_measured(response, expected, deadline, min_speed=0):
 
 
 def _probe_read_deadline(sample_size: int) -> float:
-    """Cho đường quốc tế chậm hoàn thành mẫu probe thay vì bỏ cuộc sau 12 giây."""
-    return max(_RANGE_DEADLINE, min(60.0, float(sample_size) / (40 * 1024) + 8.0))
+    return min(_PROBE_BUDGET, max(2.0, float(sample_size) / (40 * 1024)))
 
 
 def _cdn_sort_key(probe: Probe):
     # Faster first. On a tie prefer inland: Akamai from VN often bursts on
-    # the 2 MiB probe then drips during the full file.
+    # the probe then drips during the full file.
     overseas = 1 if _is_overseas_cdn(probe.url) else 0
     return (-float(probe.speed or 0), overseas)
 
@@ -974,33 +1063,55 @@ def _probe(url: str, headers: Dict[str, str], sample: Optional[int] = None) -> P
 def _collect_probes(urls, headers, callback, sample: Optional[int] = None):
     ok, errors = [], []
     workers = min(_PROBE_CAP, len(urls))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bili-probe") as pool:
+    deadline = time.monotonic() + _PROBE_BUDGET
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="bili-probe")
+    futures = {}
+    try:
         if sample is None:
             futures = {pool.submit(_probe, url, headers): url for url in urls}
         else:
             futures = {pool.submit(_probe, url, headers, sample): url for url in urls}
-        for future in as_completed(futures):
-            try:
-                probe = future.result()
+        pending = set(futures)
+        while pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+            for future in done:
+                try:
+                    probe = future.result()
+                except Exception as exc:
+                    errors.append(exc)
+                    continue
                 ok.append(probe)
                 if callback:
                     callback({"status": "downloading", "cdn": urlparse(probe.url).hostname,
                               "probe_speed": probe.speed,
                               "text": f"CDN {urlparse(probe.url).hostname}: {_human_bytes(probe.speed)}/s"})
-            except Exception as exc:
-                errors.append(exc)
+            # Do not wait for every synthetic mirror after finding two usable
+            # copies of the same object. A stuck request cannot hold up startup.
+            if ok:
+                best = min(ok, key=_cdn_sort_key)
+                compatible = [p for p in ok if p.accepts_ranges and
+                              p.length == best.length and p.sample_hash == best.sample_hash]
+                if len(compatible) >= 2 and best.speed >= 512 * 1024:
+                    deadline = min(deadline, time.monotonic() + _PROBE_GRACE)
+    finally:
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)
     return ok, errors
 
 
 def _rank_probes(urls, headers, callback=None):
     if not urls:
         raise RuntimeError("Không có địa chỉ CDN Bilibili hợp lệ")
-    # Limit concurrent benchmarks but schedule ALL supplied candidates.
+    # Queued probes are cancelled at the shared deadline, including slow mirrors.
     ok, errors = _collect_probes(urls, headers, callback)
     if not ok:
         if callback:
             callback({"status": "downloading", "event": "probe_lite",
-                      "text": "CDN quốc tế chậm khi đo 2 MiB; thử mẫu 256 KiB rồi tải thật…"})
+                      "text": "Chưa đo được CDN; thử mẫu 32 KiB trong lượt dò ngắn…"})
         ok, errors = _collect_probes(urls, headers, callback, _PROBE_LITE_SAMPLE)
     if not ok:
         detail = _range_error_detail(errors[-1]) if errors else ""
@@ -1023,6 +1134,10 @@ class ShortRangeError(RuntimeError):
     """A valid Range response ended before the requested bytes arrived."""
 
 
+class RangeIntegrityError(RuntimeError):
+    """This URL no longer serves the probed object; exclude it for this transfer."""
+
+
 def _range_error_detail(error):
     message = re.sub(r"https?://\S+", "[CDN URL]", str(error or ""))
     return f"{type(error).__name__}: {message[:180]}"
@@ -1033,20 +1148,30 @@ class _CDNPool:
         self.probes = probes
         self.scores = {p.url: p.speed for p in probes}
         self.cooldown = {}
+        self.disabled = set()
         self.lock = threading.Lock()
         self.callback = callback
         self.identity = f"{probes[0].length}:{probes[0].sample_hash}"
 
-    def ranked(self):
+    def ranked(self, exclude=()):
         with self.lock:
             now = time.monotonic()
-            return sorted(self.probes, key=lambda p: (
-                self.cooldown.get(p.url, 0) > now, -self.scores[p.url]))
+            candidates = [p for p in self.probes
+                          if p.url not in self.disabled and p.url not in exclude]
+            ready = [p for p in candidates if self.cooldown.get(p.url, 0) <= now]
+            if ready:
+                return sorted(ready, key=lambda p: -self.scores[p.url])
+            # If every remaining mirror failed, allow one bounded recovery try.
+            return sorted(candidates, key=lambda p: self.cooldown.get(p.url, 0))[:1]
 
     def failed(self, probe, error=None):
         with self.lock:
+            report = self.cooldown.get(probe.url, 0) <= time.monotonic()
             self.cooldown[probe.url] = time.monotonic() + 30
-        if self.callback:
+            self.scores[probe.url] *= .25
+            if isinstance(error, RangeIntegrityError):
+                self.disabled.add(probe.url)
+        if self.callback and report:
             action = ("thử CDN khác cho khối đang tải" if len(self.probes) > 1 else
                       "chỉ có một CDN; thử lại khối đang tải")
             self.callback({"status": "downloading", "cdn": urlparse(probe.url).hostname,
@@ -1070,10 +1195,13 @@ def _fetch_range(url: str, headers: Dict[str, str], start: int, end: int,
         min(120.0, expected / max(1, min_speed) * 1.5))
     with _open_url(request, _RANGE_TIMEOUT) as response:
         if int(response.status) != 206:
-            raise RuntimeError(f"CDN không nhận Range (HTTP {response.status})")
+            raise RangeIntegrityError(f"CDN không nhận Range (HTTP {response.status})")
         _content_range(response, start, end, total)
-        if etag and response.headers.get("ETag") != etag:
-            raise RuntimeError("CDN thay đổi nội dung giữa lúc tải")
+        # A 206 response to If-Range confirms its condition; some CDNs omit
+        # ETag on that response. An explicitly different validator is unsafe.
+        response_etag = response.headers.get("ETag")
+        if etag and response_etag and response_etag != etag:
+            raise RangeIntegrityError("CDN thay đổi nội dung giữa lúc tải")
         data = _read_measured(response, expected, deadline, min_speed)
     if len(data) != expected:
         raise ShortRangeError(f"CDN trả thiếu khối: {len(data)}/{expected} byte")
@@ -1083,8 +1211,14 @@ def _fetch_range(url: str, headers: Dict[str, str], start: int, end: int,
 def _fetch_range_retry(urls, headers: Dict[str, str], start: int, end: int) -> bytes:
     last = None
     for _round in range(2):
-        candidates = urls.ranked() if isinstance(urls, _CDNPool) else urls
-        for item in candidates:
+        attempted = set()
+        while True:
+            candidates = (urls.ranked(attempted) if isinstance(urls, _CDNPool)
+                          else [url for url in urls if url not in attempted])
+            if not candidates:
+                break
+            item = candidates[0]
+            attempted.add(item.url if isinstance(item, Probe) else item)
             started = time.monotonic()
             try:
                 if isinstance(item, Probe):
@@ -1094,7 +1228,7 @@ def _fetch_range_retry(urls, headers: Dict[str, str], start: int, end: int) -> b
                     # With no alternative CDN, aborting a slow but progressing
                     # transfer cannot improve throughput. Keep socket/deadline
                     # limits, but do not apply the CDN-switch speed threshold.
-                    if len(urls.probes) == 1:
+                    if len(urls.probes) - len(urls.disabled) <= 1:
                         floor = 0
                     try:
                         data = _fetch_range(item.url, headers, start, end,
@@ -1125,11 +1259,11 @@ def _fetch_range_retry(urls, headers: Dict[str, str], start: int, end: int) -> b
 
 def _emit_progress(callback: ProgressCallback, label: str, downloaded: int,
                    total: int, started: float, phase_start: float = 0.0,
-                   phase_span: float = 100.0) -> None:
+                   phase_span: float = 100.0, resumed: int = 0) -> None:
     if not callback:
         return
     elapsed = max(0.001, time.monotonic() - started)
-    speed = downloaded / elapsed
+    speed = max(0, downloaded - resumed) / elapsed
     fraction = min(1.0, downloaded / total) if total > 0 else 0.0
     percent = phase_start + phase_span * fraction
     eta = ((total - downloaded) / speed) if total > downloaded and speed > 0 else 0.0
@@ -1189,18 +1323,23 @@ def _resume_records(path, total, identity):
             meta = json.load(handle)
         if meta.get("total") != total or meta.get("identity") != identity:
             return []
-        records, offset = [], 0
+        records, seen = [], set()
         with open(path, "rb") as handle:
             for rec in meta["chunks"]:
+                offset = rec["start"]
+                if (not isinstance(offset, int) or offset < 0 or offset >= total
+                        or offset % _CHUNK or offset in seen):
+                    continue
                 length = min(_CHUNK, total - offset)
-                if not length or rec["start"] != offset or rec["length"] != length:
-                    break
+                if rec["length"] != length:
+                    continue
+                handle.seek(offset)
                 block = handle.read(length)
                 if len(block) != length or hashlib.sha256(block).hexdigest() != rec["sha256"]:
-                    break
+                    continue
                 records.append(rec)
-                offset += length
-        return records
+                seen.add(offset)
+        return sorted(records, key=lambda rec: rec['start'])
     except (OSError, ValueError, KeyError, TypeError):
         return []
 
@@ -1236,43 +1375,71 @@ def _download_single(url: str, headers: Dict[str, str], part_path: str,
 def _download_ranges(urls, headers: Dict[str, str], part_path: str,
                      total: int, label: str, callback: ProgressCallback,
                      phase_start: float, phase_span: float, window=None) -> str:
-    window = _WINDOW if window is None else window
+    window = max(1, _WINDOW if window is None else int(window))
     identity = (urls.identity if isinstance(urls, _CDNPool) else
                 hashlib.sha256(str(list(urls)).encode()).hexdigest())
     records = _resume_records(part_path, total, identity)
-    aligned = sum(rec["length"] for rec in records)
+    resumed = downloaded = sum(rec["length"] for rec in records)
+    completed = {rec['start'] for rec in records}
     meta = {"identity": identity, "total": total, "chunks": records}
     mode = "r+b" if os.path.exists(part_path) else "wb"
     started = time.monotonic()
-    digest = hashlib.sha256()
     with open(part_path, mode) as handle:
-        handle.truncate(aligned)
-        handle.seek(0)
-        for rec in records:
-            digest.update(handle.read(rec["length"]))
-        handle.seek(aligned)
+        # Sparse writes are only trusted through their individual saved hashes.
+        handle.truncate(total)
         _save_integrity(part_path + ".json", meta)
-        _emit_progress(callback, label, aligned, total, started, phase_start, phase_span)
-        starts = range(aligned, total, _CHUNK)
+        _emit_progress(callback, label, downloaded, total, started, phase_start, phase_span, resumed)
+        starts = iter(start for start in range(0, total, _CHUNK) if start not in completed)
         with ThreadPoolExecutor(max_workers=window, thread_name_prefix="bili-range") as pool:
-            for base in range(0, len(starts), window):
-                batch = starts[base:base + window]
-                futures = [(start, pool.submit(_fetch_range_retry, urls, headers,
-                            start, min(total, start + _CHUNK) - 1)) for start in batch]
-                for start, future in futures:
-                    block = future.result()
+            pending = {}
+
+            def fill_window():
+                while len(pending) < window:
+                    start = next(starts, None)
+                    if start is None:
+                        break
+                    pending[pool.submit(_fetch_range_retry, urls, headers,
+                                        start, min(total, start + _CHUNK) - 1)] = start
+
+            fill_window()
+            failure = None
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    start = pending.pop(future)
+                    try:
+                        block = future.result()
+                    except Exception as exc:
+                        failure = failure or exc
+                        continue
                     expected = min(_CHUNK, total - start)
                     if len(block) != expected:
-                        raise RuntimeError("Khối tải về không đủ kích thước")
+                        failure = failure or RangeDownloadError("Khối tải về không đủ kích thước")
+                        continue
                     handle.seek(start)
                     handle.write(block)
-                    digest.update(block)
                     records.append({"start": start, "length": len(block),
                                     "sha256": hashlib.sha256(block).hexdigest()})
+                    downloaded += len(block)
                     handle.flush()
                     _save_integrity(part_path + ".json", meta)
-                    _emit_progress(callback, label, start + len(block), total,
-                                   started, phase_start, phase_span)
+                    _emit_progress(callback, label, downloaded, total,
+                                   started, phase_start, phase_span, resumed)
+                # Save successful in-flight chunks even if another fails, but
+                # stop scheduling new ones until the lower-concurrency recovery.
+                if failure is None:
+                    fill_window()
+            if failure is not None:
+                raise failure
+    # Verify disk bytes against the hashes captured from network responses.
+    # Hashing the finished file twice alone would also accept a bad disk write.
+    digest = hashlib.sha256()
+    with open(part_path, 'rb') as handle:
+        for rec in sorted(records, key=lambda rec: rec['start']):
+            block = handle.read(rec['length'])
+            if len(block) != rec['length'] or hashlib.sha256(block).hexdigest() != rec['sha256']:
+                raise RangeIntegrityError('Khối đã lưu sai SHA256; không công nhận tải xong')
+            digest.update(block)
     return digest.hexdigest()
 
 
@@ -1344,18 +1511,41 @@ def _download_stream(urls: Sequence[str], destination: str, headers: Dict[str, s
 
 def download_bilibili(url: str, out_dir: str, quality: str = "best",
                        cookies_file: Optional[str] = None,
-                       progress_callback: ProgressCallback = None) -> Tuple[str, int, str]:
+                       progress_callback: ProgressCallback = None,
+                       cookies_from_browser: Optional[str] = None) -> Tuple[str, int, str]:
     """Tải link Bilibili thành MP4; trả ``(path, qn_thực, kiểu_luồng)``."""
     bvid = extract_bvid(url)
     if not is_bilibili_url(url) or not bvid:
         raise ValueError("Không phải link video Bilibili có BV id hợp lệ")
     os.makedirs(out_dir, exist_ok=True)
-    title, cid, page, pages, part = _view_info(bvid, url, cookies_file)
     want = quality_qn(quality)
-    stream = _fetch_playurl(bvid, cid, want, cookies_file)
+    try:
+        title, stream, headers = _ytdlp_metadata(url, quality, cookies_file,
+                                               cookies_from_browser, progress_callback)
+        page, pages, part = 1, 1, ''
+    except Exception as exc:
+        if progress_callback:
+            progress_callback({'status': 'downloading', 'event': 'metadata_fallback',
+                               'text': 'Chưa lấy được danh sách luồng yt-dlp; thử API Bilibili dự phòng '
+                                       f'({type(exc).__name__}).'})
+        title, cid, page, pages, part = _view_info(bvid, url, cookies_file)
+        stream = _fetch_playurl(bvid, cid, want, cookies_file)
+        headers = _headers(bvid, cookies_file, accept='*/*')
+    if progress_callback:
+        requested = str(quality or 'best').strip().lower()
+        text = f"Chọn luồng nguồn {quality_label(stream.quality)} · {stream.kind.upper()}"
+        if stream.width and stream.height:
+            text += f' · {stream.width}×{stream.height}'
+        if requested == 'best':
+            text += " · ưu tiên chất lượng cao nhất khả dụng trước CDN"
+        elif stream.quality < want:
+            text += (f" · thấp hơn mức yêu cầu {requested}p; phiên Bilibili hiện tại "
+                     "chưa cấp luồng cao hơn. Kiểm tra nguồn và đăng nhập/cookies.")
+        progress_callback({'status': 'downloading', 'event': 'quality_selected',
+                           'requested_quality': requested, 'quality': stream.quality,
+                           'text': text})
     filename = _safe_filename(title, bvid, page, pages, part)
     destination = _unique_path(out_dir, filename)
-    headers = _headers(bvid, cookies_file, accept="*/*")
 
     if stream.kind == "mp4":
         _download_stream(stream.video_urls, destination, headers,

@@ -36,6 +36,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import math
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence, Tuple
 
@@ -53,6 +55,8 @@ def _clean_marks(marks) -> List[Tuple[float, float]]:
             else:
                 a, b = float(item[0]), float(item[1])
         except (TypeError, ValueError, KeyError, IndexError):
+            continue
+        if not math.isfinite(a) or not math.isfinite(b):
             continue
         if b < a:
             a, b = b, a
@@ -75,9 +79,16 @@ class SpeechMap:
 
     marks: List[Tuple[float, float]] = field(default_factory=list)
     time_scale: float = 1.0
+    _midpoints: list = field(default_factory=list, init=False, repr=False, compare=False)
+    _mid_order: list = field(default_factory=list, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.marks = _clean_marks(self.marks)
+        # Midpoints need not follow start order when observations overlap.
+        # Index once instead of copying the movie's remaining marks per cue.
+        ordered = sorted(((a + b) / 2, i) for i, (a, b) in enumerate(self.marks))
+        self._midpoints = [mid for mid, _ in ordered]
+        self._mid_order = [i for _, i in ordered]
         try:
             self.time_scale = float(self.time_scale or 1.0)
         except (TypeError, ValueError):
@@ -130,15 +141,9 @@ class SpeechMap:
         """Các mốc có TÂM nằm trong [start, end]."""
         if self.empty or end <= start:
             return []
-        i = max(0, self._bisect(start) - 2)
-        out: List[Tuple[float, float]] = []
-        for a, b in self.marks[i:]:
-            if a > end:
-                break
-            mid = (a + b) / 2.0
-            if start <= mid <= end:
-                out.append((a, b))
-        return out
+        left = bisect_left(self._midpoints, start)
+        right = bisect_right(self._midpoints, end)
+        return [self.marks[i] for i in sorted(self._mid_order[left:right])]
 
     def speech_seconds(self, start: float, end: float) -> float:
         """Tổng thời lượng THẬT có tiếng nói trong khoảng, tính theo mốc ký tự."""
